@@ -15,7 +15,7 @@ class GameACNetwork(ABC):
     """Actor-Critic Network Base Class."""
 
     use_mnih_2015 = False
-    use_gpu = False
+    # use_gpu = False
 
     def __init__(self, action_size,
                  thread_index,  # -1 for global
@@ -66,7 +66,7 @@ class GameACNetwork(ABC):
                 + vf_loss * critic_lr
 
     def prepare_sil_loss(self, entropy_beta=0, w_loss=1.0, critic_lr=0.5,
-                         min_batch_size=1):
+                         min_batch_size=1, use_sil_neg=False):
         """Prepare self-imitation loss.
 
         Keyword arguments:
@@ -97,9 +97,13 @@ class GameACNetwork(ABC):
                                           name="memory_weights")
 
             # Our implementation with no reward clipping
-            mask = tf.where(
-                self.returns - tf.squeeze(self.v) > 0.0,
-                tf.ones_like(self.returns), tf.zeros_like(self.returns))
+            # test if also use negative samples
+            if use_sil_neg:
+                mask = tf.ones_like(self.returns)
+            else:
+                mask = tf.where(
+                    self.returns - tf.squeeze(self.v) > 0.0,
+                    tf.ones_like(self.returns), tf.zeros_like(self.returns))
             self.num_valid_samples = tf.reduce_sum(mask)
             self.num_samples = tf.maximum(self.num_valid_samples,
                                           min_batch_size)
@@ -110,8 +114,11 @@ class GameACNetwork(ABC):
             v_estimate = tf.squeeze(self.v)
 
             advs = self.returns - v_estimate
-            self.clipped_advs = tf.stop_gradient(
-                tf.maximum(tf.zeros_like(advs), advs))
+            if use_sil_neg:
+                self.clipped_advs = tf.stop_gradient(advs)
+            else:
+                self.clipped_advs = tf.stop_gradient(
+                    tf.maximum(tf.zeros_like(advs), advs))
 
             # sil_pg_loss = self.weights * neglogpac * self.clipped_advs
             sil_pg_loss = neglogpac * self.clipped_advs
@@ -122,8 +129,11 @@ class GameACNetwork(ABC):
             entropy = tf.reduce_sum(entropy) / self.num_samples
 
             val_error = v_estimate - self.returns
-            delta = tf.stop_gradient(
-                tf.minimum(val_error, tf.zeros_like(self.returns)) * mask)
+            if use_sil_neg:
+                delta = tf.stop_gradient(val_error * mask)
+            else:
+                delta = tf.stop_gradient(
+                    tf.minimum(val_error, tf.zeros_like(self.returns)) * mask)
             # sil_val_loss = self.weights * val_error * delta
             sil_val_loss = val_error * delta
             sil_val_loss = tf.reduce_sum(sil_val_loss) / self.num_samples
@@ -235,7 +245,8 @@ class GameACNetwork(ABC):
         """
         return tf.nn.conv2d(
             x, W, strides=[1, stride, stride, 1], padding=padding,
-            use_cudnn_on_gpu=self.use_gpu, data_format=data_format, name=name)
+            # use_cudnn_on_gpu=self.use_gpu,
+            data_format=data_format, name=name)
 
     def load_transfer_model(self, sess, folder=None, not_transfer_fc2=False,
                             not_transfer_fc1=False, not_transfer_conv3=False,
@@ -244,6 +255,7 @@ class GameACNetwork(ABC):
         assert folder is not None
         assert folder.is_dir()
         assert self._thread_index == -1  # only load model to global network
+        # assert self._thread_index < 0  # only load model to global network
 
         logger.info("Initialize network from a pretrain"
                     " model in {}".format(folder))

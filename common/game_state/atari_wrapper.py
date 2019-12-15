@@ -2,44 +2,44 @@
 """
 https://github.com/dbobrenko/reinforcement-learning-notes/blob/master/notes/dqn-agent.md
 """
-import cv2
 import gym
 import logging
-import numpy as np
-import pygame
 import pyglet
+import cv2
 import threading
+import numpy as np
 
-from gym import spaces
 from time import sleep
+from gym import spaces
 
 logger = logging.getLogger("atari_wrapper")
 
-
 class AtariWrapper(gym.Wrapper):
-    """Sets the frame skip in ale and overrides step function
+    """
+    Sets the frame skip in ale and overrides step function
     in order to speed up game simulation
     Should only be used for Deterministic and NoFrameskip version of Atari gym
     """
-    def __init__(self, env, noop_max=30, skip=4):
+    def __init__(self, env, noop_max=30, skip=4, override_num_noops=None):
         gym.Wrapper.__init__(self, env)
 
         self.noop_max = noop_max
-        self.override_num_noops = None
+        self.override_num_noops = override_num_noops
         self.noop_action = 0
         self._skip = skip
 
         # set frame skip in ALE
         # self.unwrapped.ale.setInt('frame_skip'.encode('utf-8'), self.unwrapped.frameskip)
-        self.unwrapped.ale.setBool('sound'.encode('utf-8'), True)
-        self.unwrapped.seed()
+        # self.unwrapped.seed()
 
         logger.info("ALE lives: {}".format(self.unwrapped.ale.lives()))
+        #logger.info("frameskip: {} / {}".format(self.unwrapped.ale.getInt('frame_skip'.encode('utf-8')), self.unwrapped.frameskip))
         logger.info("ALE frameskip: {} / {}".format(self.unwrapped.ale.getInt('frame_skip'.encode('utf-8')), self.unwrapped.frameskip))
         logger.info("ALE repeat_action_probability: {}".format(self.unwrapped.ale.getFloat('repeat_action_probability'.encode('utf-8'))))
         logger.info("Gym action_space: {}".format(self.env.action_space))
         logger.info("AtariWrapper frameskip: {}".format(self._skip))
         logger.info("AtariWrapper noop_max: {}".format(self.noop_max))
+        logger.info("AtariWrapper noop_override: {}".format(self.override_num_noops))
 
     def step(self, a):
         return self.env.step(a)
@@ -53,27 +53,30 @@ class AtariWrapper(gym.Wrapper):
         else:
             noops = np.random.randint(1, self.noop_max + 1)
 
-        assert noops > 0
-        if self._skip == 1:
-            for _ in range(noops):
-                for i in range(skip):
+        assert noops >= 0
+        if noops > 0:
+            if self._skip == 1:
+                for _ in range(noops):
+                    for i in range(skip):
+                        obs, _, done, _ = self.env.step(self.noop_action)
+                        if done:
+                            break
+                    if done:
+                        obs = self.env.reset(**kwargs)
+            else:
+                for _ in range(noops):
                     obs, _, done, _ = self.env.step(self.noop_action)
                     if done:
-                        break
-                if done:
-                    obs = self.env.reset(**kwargs)
-        else:
-            for _ in range(noops):
-                obs, _, done, _ = self.env.step(self.noop_action)
-                if done:
-                    obs = self.env.reset(**kwargs)
+                        obs = self.env.reset(**kwargs)
+        elif noops == 0:
+            # obs, _, done, _ = self.env.step(self.noop_action)
+            # if done:
+            obs = self.env.reset(**kwargs)
 
         return obs
 
-
 class FireResetEnv(gym.Wrapper):
     """Take action on reset for environments that are fixed until firing."""
-
     def __init__(self, env):
         gym.Wrapper.__init__(self, env)
         assert env.unwrapped.get_action_meanings()[1] == 'FIRE'
@@ -92,7 +95,6 @@ class FireResetEnv(gym.Wrapper):
 
     def step(self, ac):
         return self.env.step(ac)
-
 
 class MaxAndSkipEnv(gym.Wrapper):
     def __init__(self, env, skip=4):
@@ -122,7 +124,6 @@ class MaxAndSkipEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
-
 
 class EpisodicLifeEnv(gym.Wrapper):
     def __init__(self, env):
@@ -161,33 +162,15 @@ class EpisodicLifeEnv(gym.Wrapper):
         self.lives = self.env.unwrapped.ale.lives()
         return obs
 
-
 class HumanDemoEnv(gym.Wrapper):
     def __init__(self, env):
         gym.Wrapper.__init__(self, env)
-
-        logger.info("ALE sound: {}".format(self.unwrapped.ale.getBool('sound'.encode('utf-8'))))
         logger.info("HumanDemoEnv: {}".format(True))
-
-        pygame.init()
-        pygame.joystick.init()
-        self.clock = pygame.time.Clock()
-        # Get count of joysticks
-        joystick_count = pygame.joystick.get_count()
-        self.valid_joy = False
-        if joystick_count > 0:
-            joystick = pygame.joystick.Joystick(0)
-            joystick.init()
-            # Get the name from the OS for the controller/joystick
-            name = joystick.get_name()
-            if "Xbox" in name or "Sony" in name:
-                self.valid_joy = True
-            logger.info("Joystick: {}".format(name))
 
         self.key = pyglet.window.key
         self.keys = self.key.KeyStateHandler()
         self.env.render(mode='human')
-        self.env.unwrapped.viewer.window.set_size(110+500, 210+500)
+        self.env.unwrapped.viewer.window.set_size(110+300, 210+300)
         self.env.unwrapped.viewer.window.push_handlers(self.keys)
 
         self.human_agent_action = 0
@@ -221,60 +204,23 @@ class HumanDemoEnv(gym.Wrapper):
             for keyword, key in KEYWORD_TO_KEY.items():
                 if keyword in action_meaning:
                     keys.append(key)
-            keys = tuple(keys)
+            keys = tuple(sorted(keys))
 
             assert keys not in keys_to_action
             keys_to_action[keys] = action_id
 
         return keys_to_action
 
-    def joy_mapping(self, hat=(0,0), fire=0):
-        key = []
-        if hat[1] == 1:
-            key.append(self.key.UP)
-        elif hat[1] == -1:
-            key.append(self.key.DOWN)
-        if hat[0] == 1:
-            key.append(self.key.RIGHT)
-        elif hat[0] == -1:
-            key.append(self.key.LEFT)
-        if fire:
-            key.append(self.key.SPACE)
-
-        return key
-
     def update_human_agent_action(self):
         while not self.stop_thread:
-            for event in pygame.event.get():  # User did something
-                # Possible joystick actions:
-                # JOYAXISMOTION JOYBALLMOTION
-                # JOYBUTTONDOWN JOYBUTTONUP JOYHATMOTION
-                if event.type == pygame.JOYBUTTONDOWN:
-                    pass
-                if event.type == pygame.JOYBUTTONUP:
-                    pass
-
             key = []
-            if self.valid_joy and pygame.joystick.get_count() > 0:
-                joystick = pygame.joystick.Joystick(0)
-                joystick.init()
-                hat = joystick.get_hat(0)
-                button_A = joystick.get_button(0)
-                key = self.joy_mapping(hat, button_A)
-
             for k in [self.key.UP, self.key.DOWN, self.key.LEFT, self.key.RIGHT, self.key.SPACE]:
                 if self.keys[k]:
                     key.append(k)
-
-            # key = tuple(sorted(key))
-            key = tuple(key)
-
+            key = tuple(sorted(key))
             action = self.action_map.get(key, 0)
-            # if len(key) > 0:
-            #     logger.warning("{} {}".format(action, self.unwrapped.get_action_meanings()[action]))
             self.human_agent_action = action
-            # sleep(0.001)
-            self.clock.tick(1200)
+            sleep(0.001)
 
     def close(self):
         self.stop_thread = True
@@ -308,7 +254,6 @@ class WarpFrame(gym.ObservationWrapper):
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
         return frame[:, :]
-
 
 class ScaledFloatFrame(gym.ObservationWrapper):
     def __init__(self, env):

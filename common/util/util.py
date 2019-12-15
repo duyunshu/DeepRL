@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-import random
-import tables
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-import pathlib
 import cv2
 import gzip
+import logging
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import pathlib
+import random
 import shutil
 import sqlite3
-import logging
+import tables
 
-from math import sqrt
 from collections import defaultdict
+from math import sqrt
 
 logger = logging.getLogger("util")
 
@@ -26,17 +26,22 @@ def percent_decrease(v1, v2):
     """
     return (v2 - v1) / (abs(v1) + 1e-10) * 100
 
+
 def transform_h(z, eps=10**-2):
     return (np.sign(z) * (np.sqrt(np.abs(z) + 1.) - 1.)) + (eps * z)
+
 
 def transform_h_inv(z, eps=10**-2):
     return np.sign(z) * (np.square((np.sqrt(1 + 4 * eps * (np.abs(z) + 1 + eps)) - 1) / (2 * eps)) - 1)
 
+
 def transform_h_log(z, eps=.6):
     return (np.sign(z) * np.log(1. + np.abs(z)) * eps)
 
+
 def transform_h_inv_log(z, eps=.6):
     return np.sign(z) * (np.exp(np.abs(z) / eps) - 1)
+
 
 def grad_cam(activations, gradients):
     # global average pooling
@@ -51,35 +56,38 @@ def grad_cam(activations, gradients):
 
     return cam
 
-def visualize_cam(cam):
+
+def visualize_cam(cam, shape=(84, 84)):
     # create heatmap image for cam
     if np.max(cam) > 0:
-        cam = cam / np.max(cam) # scale to 0 to 1.0
-    cam = cv2.resize(cam, (84, 84))
+        cam = cam / np.max(cam)  # scale to 0 to 1.0
+    cam = cv2.resize(cam, shape)
 
     cam_heatmap = cv2.applyColorMap(np.uint8(255*cam), cv2.COLORMAP_JET)
     cam_heatmap = cv2.cvtColor(cam_heatmap, cv2.COLOR_BGR2RGB)
 
     return cam_heatmap
 
-def generate_image_for_cam_video(state_img, cam_img, global_t, img_index, action):
+
+def generate_image_for_cam_video(state_img, cam_img, global_t, img_index,
+                                 action, shape=84):
     cam_img = np.uint8(cam_img)
 
     # create one state
-    mean_state = np.mean(state_img[:,:,0:3], axis=-1)
-    state = np.maximum(state_img[:,:,3], mean_state)
+    mean_state = np.mean(state_img[:, :, 0:3], axis=-1)
+    state = np.maximum(state_img[:, :, 3], mean_state)
     state = np.uint8(state)
 
     state_rgb = cv2.cvtColor(state, cv2.COLOR_GRAY2RGB)
 
     # add information text to output video
-    info = np.zeros((84, 110, 3), dtype=np.uint8)
+    info = np.zeros((shape, 110, 3), dtype=np.uint8)
     cv2.putText(info, "Step#{}".format(global_t),
-        (3, 15), cv2.FONT_HERSHEY_DUPLEX, .4, (255, 255, 255), 1)
+                (3, 15), cv2.FONT_HERSHEY_DUPLEX, .4, (255, 255, 255), 1)
     cv2.putText(info, "Frame#{}".format(img_index),
-        (3, 30), cv2.FONT_HERSHEY_DUPLEX, .4, (255, 255, 255), 1)
+                (3, 30), cv2.FONT_HERSHEY_DUPLEX, .4, (255, 255, 255), 1)
     cv2.putText(info, "{}".format(action),
-        (3, 45), cv2.FONT_HERSHEY_DUPLEX, .4, (255, 255, 255), 1)
+                (3, 45), cv2.FONT_HERSHEY_DUPLEX, .4, (255, 255, 255), 1)
 
     # overlay cam-state
     # alpha = 0.5
@@ -87,10 +95,11 @@ def generate_image_for_cam_video(state_img, cam_img, global_t, img_index, action
     # overlay_output = cv2.hconcat((output, info))
 
     # side-by-side cam-state
-    hcat_cam_state =  cv2.hconcat((cam_img, state_rgb))
+    hcat_cam_state = cv2.hconcat((cam_img, state_rgb))
     vcat_title_camstate = cv2.hconcat((hcat_cam_state, info))
 
     return vcat_title_camstate
+
 
 def solve_weight(numbers):
     # https://stackoverflow.com/questions/38363764/
@@ -99,10 +108,11 @@ def solve_weight(numbers):
     # (total # of sample) / ((# of classes) * (# of sample in class i))
     sum_number = sum(numbers)
     len_number = len(numbers)
-    #solved = [sum_number / (len_number * (n+1e-20)) for n in numbers]
+    # solved = [sum_number / (len_number * (n+1e-20)) for n in numbers]
     solved = [sum_number / (len_number * (n+1)) for n in numbers]
 
     return solved
+
 
 def load_memory(name=None, demo_memory_folder=None, demo_ids=None):
     assert demo_ids is not None
@@ -117,7 +127,7 @@ def load_memory(name=None, demo_memory_folder=None, demo_ids=None):
 
     conn = sqlite3.connect(
         str(demo_memory_folder / 'demo.db'),
-        detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     db = conn.cursor()
     replay_buffers = {}
     total_memory = 0
@@ -155,6 +165,7 @@ def load_memory(name=None, demo_memory_folder=None, demo_ids=None):
     conn.close()
     return replay_buffers, action_distribution, total_rewards, total_steps
 
+
 def egreedy(readout_t, n_actions=-1):
     assert n_actions > 1
     best_indices = [0]
@@ -168,6 +179,7 @@ def egreedy(readout_t, n_actions=-1):
     action_index = random.choice(best_indices)
     return action_index
 
+
 def get_action_index(readout_t, is_random=False, n_actions=-1):
     assert n_actions > 1
     action_index = 0
@@ -176,6 +188,7 @@ def get_action_index(readout_t, is_random=False, n_actions=-1):
     else:
         action_index = egreedy(readout_t, n_actions)
     return action_index
+
 
 def graves_rmsprop_optimizer(loss, learning_rate, rmsprop_decay, rmsprop_constant, gradient_clip):
     """
@@ -222,6 +235,7 @@ def graves_rmsprop_optimizer(loss, learning_rate, rmsprop_decay, rmsprop_constan
 
         return tf.group(train, tf.group(*avg_grad_updates)), grads_and_vars
 
+
 def plot_conv_weights(weights, name, channels_all=True, folder=''):
     """
     Plots convolutional filters
@@ -257,7 +271,7 @@ def plot_conv_weights(weights, name, channels_all=True, folder=''):
     grid_r, grid_c = get_grid_dim(num_filters)
 
     # create figure and axes
-    #fig, axes = plt.subplots(min([grid_r, grid_c]),
+    # fig, axes = plt.subplots(min([grid_r, grid_c]),
     #                         max([grid_r, grid_c]))
 
     # iterate channels
@@ -277,6 +291,7 @@ def plot_conv_weights(weights, name, channels_all=True, folder=''):
         # save figure
         fig.savefig(os.path.join(plot_dir, '{}-{}.png'.format(name, channel)), bbox_inches='tight')
         plt.close(fig)
+
 
 def plot_conv_output(conv_img, name, folder=''):
     """
@@ -322,6 +337,7 @@ def plot_conv_output(conv_img, name, folder=''):
     # save figure
     plt.savefig(os.path.join(plot_dir, '{}.png'.format(name)), bbox_inches='tight')
 
+
 def get_grid_dim(x):
     """
     Transforms x into product of two integers
@@ -337,6 +353,7 @@ def get_grid_dim(x):
     i = len(factors) // 2
     return factors[i], factors[i]
 
+
 def prime_powers(n):
     """
     Compute the factors of a positive integer
@@ -351,6 +368,7 @@ def prime_powers(n):
             factors.add(int(x))
             factors.add(int(n // x))
     return sorted(factors)
+
 
 def empty_dir(path):
     """
@@ -369,6 +387,7 @@ def empty_dir(path):
         except Exception as e:
             logger.warn('Warning: {}'.format(e))
 
+
 def create_dir(path):
     """
     Creates a directory
@@ -382,9 +401,10 @@ def create_dir(path):
         if exc.errno != errno.EEXIST:
             raise
 
+
 def prepare_dir(path, empty=False):
     """
-    Creates a directory if it soes not exist
+    Creates a directory if it does not exist
     :param path: string, path to desired directory
     :param empty: boolean, delete all directory content if it exists
     :return: nothing
@@ -399,9 +419,10 @@ def prepare_dir(path, empty=False):
     if empty:
         empty_dir(path)
 
-#This code allows gifs to be saved of the training episode for use in the Control Center.
-def make_movie(images, fname, duration=2, true_image=False,salience=False,salIMGS=None):
-    """
+
+def make_movie(images, fname, duration=2, true_image=False, salience=False,
+               salIMGS=None):
+    """This code allows gifs to be saved of the training episode for use in the Control Center.
     src: https://github.com/awjuliani/DeepRL-Agents/blob/master/helper.py
     """
     import moviepy.editor as mpy
@@ -436,6 +457,7 @@ def make_movie(images, fname, duration=2, true_image=False,salience=False,salIMG
         clip.write_videofile(fname + ".mp4", fps=24)
         #clip.write_gif(fname + ".gif", fps=(len(images) / duration), verbose=False)
 
+
 def process_frame42(frame):
     frame = frame[34:34+160, :160]
     # Resize by half, then down to 42x42 (essentially mipmapping). If
@@ -450,6 +472,7 @@ def process_frame42(frame):
     #frame = np.reshape(frame, [np.prod(frame.shape)])
     return frame
 
+
 def process_frame84(frame):
     frame = frame[34:34+160, :160]
     frame = cv2.resize(frame, (84, 84))
@@ -459,6 +482,7 @@ def process_frame84(frame):
     #frame = np.reshape(frame, [84, 84, 1])
     #frame = np.reshape(frame, [np.prod(frame.shape)])
     return frame
+
 
 def process_frame(frame, h, w):
     frame = frame[34:34+160, :160]
@@ -470,10 +494,12 @@ def process_frame(frame, h, w):
     #frame = np.reshape(frame, [np.prod(frame.shape)])
     return frame
 
+
 def compress_h5file(file_h5, gz_compress_level=1):
     with file_h5.open('rb') as f_in, gzip.open(str(file_h5.with_suffix('.h5.gz')), 'wb', gz_compress_level) as f_out:
         shutil.copyfileobj(f_in, f_out)
     return file_h5.with_suffix('.h5.gz')
+
 
 def uncompress_h5file(file_h5):
     import uuid
@@ -485,6 +511,7 @@ def uncompress_h5file(file_h5):
         h5file = tables.open_file(str(temp_file), mode='r')
     return h5file, temp_file
 
+
 def save_compressed_images(file_h5, imgs):
     h5file = tables.open_file(str(file_h5), mode='w', title='Images Array')
     root = h5file.root
@@ -494,6 +521,7 @@ def save_compressed_images(file_h5, imgs):
     remove_h5file(file_h5)
     return gz_file
 
+
 def get_compressed_images(h5file_gz):
     h5file, temp_file = uncompress_h5file(h5file_gz)
     imgs = h5file.root.images[:]
@@ -501,24 +529,28 @@ def get_compressed_images(h5file_gz):
     remove_h5file(temp_file)
     return imgs
 
+
 def remove_h5file(file_h5):
     file_h5.unlink()
 
+
 def get_activations(sess, layer, s_t, s, keep_prob):
-  units = sess.run(layer, feed_dict={s: [s_t], keep_prob:1.0})
-  plot_nnfilter(units)
+    units = sess.run(layer, feed_dict={s: [s_t], keep_prob:1.0})
+    plot_nnfilter(units)
+
 
 def plot_nnfilter(units):
-  import matplotlib.pyplot as plt
-  import math
-  filters = units.shape[3]
-  plt.figure(1, figsize=(20,20))
-  n_columns = 6
-  n_rows = math.ceil(filters / n_columns) + 1
-  for i in range(filters):
-    plt.subplot(n_rows, n_columns, i+1)
+    import math
+    import matplotlib.pyplot as plt
+    filters = units.shape[3]
+    plt.figure(1, figsize=(20, 20))
+    n_columns = 6
+    n_rows = math.ceil(filters / n_columns) + 1
+    for i in range(filters):
+        plt.subplot(n_rows, n_columns, i+1)
     plt.title('Filter ' + str(i))
-    plt.imshow(units[0,:,:,i], interpolation="nearest", cmap="gray")
+    plt.imshow(units[0, :, :, i], interpolation="nearest", cmap="gray")
+
 
 def montage(W):
     """Draws all filters (n_input * n_output filters) as a

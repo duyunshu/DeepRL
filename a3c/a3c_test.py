@@ -67,11 +67,6 @@ def run_a3c_test(args):
                 end_str += '_nofc2'
         if args.finetune_upper_layers_only:
             end_str += '_tune_upperlayers'
-        if args.train_with_demo_num_steps > 0 \
-           or args.train_with_demo_num_epochs > 0:
-            end_str += '_pretrain_ina3c'
-        if args.use_demo_threads:
-            end_str += '_demothreads'
 
         if args.load_pretrained_model:
             if args.use_pretrained_model_as_advice:
@@ -170,11 +165,9 @@ def run_a3c_test(args):
     A3CTrainingThread.log_interval = args.log_interval
     A3CTrainingThread.performance_log_interval = args.performance_log_interval
     A3CTrainingThread.local_t_max = args.local_t_max
-    A3CTrainingThread.demo_t_max = args.demo_t_max
     A3CTrainingThread.use_lstm = args.use_lstm
     A3CTrainingThread.action_size = action_size
     A3CTrainingThread.entropy_beta = args.entropy_beta
-    A3CTrainingThread.demo_entropy_beta = args.demo_entropy_beta
     A3CTrainingThread.gamma = args.gamma
     A3CTrainingThread.use_mnih_2015 = args.use_mnih_2015
     A3CTrainingThread.env_id = args.gym_env
@@ -216,7 +209,7 @@ def run_a3c_test(args):
 
             if args.use_mnih_2015:
                 end_str += '_mnih2015'
-            end_str += '_l2beta1E-04_batchprop'  # TODO: make this an argument
+            end_str += '_l2beta1E-04_oversample'  # TODO(make this an argument)
             transfer_folder += end_str
 
         transfer_folder = pathlib.Path(transfer_folder)
@@ -282,6 +275,12 @@ def run_a3c_test(args):
                 transfer_var_list += [
                     global_network.W_conv3,
                     global_network.b_conv3,
+                    ]
+
+            if '_slv' in str(transfer_folder):
+                transfer_var_list += [
+                    global_network.W_fc3,
+                    global_network.b_fc3,
                     ]
 
         global_network.load_transfer_model(

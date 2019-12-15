@@ -3,6 +3,7 @@ import cv2
 import logging
 import numpy as np
 import random
+import time
 
 from common.replay_memory import PrioritizedReplayBuffer
 from common.util import transform_h
@@ -16,7 +17,7 @@ class SILReplayMemory(object):
 
     def __init__(self, num_actions, max_len=None, gamma=0.99, clip=False,
                  height=84, width=84, phi_length=4, priority=False,
-                 reward_constant=0):
+                 reward_constant=0, fs_size=0):
         """Initialize SILReplayMemory class."""
         if priority:
             self.buff = PrioritizedReplayBuffer(max_len, alpha=0.6)
@@ -26,6 +27,7 @@ class SILReplayMemory(object):
             self.rewards = []
             self.terminal = []
             self.returns = []
+            self.fullstates = []  # for the purpose of restore to a state
 
         self.priority = priority
         self.num_actions = num_actions
@@ -36,6 +38,7 @@ class SILReplayMemory(object):
         self.width = width
         self.phi_length = phi_length
         self.reward_constant = reward_constant
+        self.fs_size = fs_size
 
     def log(self):
         """Log memory information."""
@@ -48,7 +51,7 @@ class SILReplayMemory(object):
         logger.info("reward_constant: {}".format(self.reward_constant))
         logger.info("memory size: {}".format(self.__len__()))
 
-    def add_item(self, s, a, rew, t):
+    def add_item(self, s, fs, a, rew, t):
         """Use only for episode memory."""
         assert len(self.returns) == 0
         assert not self.priority
@@ -56,6 +59,7 @@ class SILReplayMemory(object):
             s = cv2.resize(s, (self.height, self.width),
                            interpolation=cv2.INTER_AREA)
         self.states.append(s)
+        self.fullstates.append(fs)
         self.actions.append(a)
         self.rewards.append(rew)
         self.terminal.append(t)
@@ -63,21 +67,25 @@ class SILReplayMemory(object):
     def get_data(self):
         """Get data."""
         return (deepcopy(self.states),
+                deepcopy(self.fullstates),
                 deepcopy(self.actions),
                 deepcopy(self.rewards),
                 deepcopy(self.terminal))
 
-    def set_data(self, s, a, r, t):
+    def set_data(self, s, fs, a, r, t):
         """Set data."""
         self.states = s
+        self.fullstates = fs
         self.actions = a
         self.rewards = r
         self.terminal = t
+
 
     def reset(self):
         """Reset memory."""
         assert not self.priority
         self.states.clear()
+        self.fullstates.clear()
         self.actions.clear()
         self.rewards.clear()
         self.terminal.clear()
@@ -90,21 +98,24 @@ class SILReplayMemory(object):
     def extend(self, x):
         """Use only in SIL memory."""
         assert x.terminal[-1]  # assert that last state is a terminal state
+
         x_returns = self.__class__.compute_returns(
             x.rewards, x.terminal, self.gamma, self.clip, self.reward_constant)
 
         if self.priority:
-            data = zip(x.states, x.actions, x_returns)
+            data = zip(x.states, x.fullstates, x.actions, x_returns)
             for feature in data:
                 self.buff.add(*feature)
         else:
             self.states.extend(x.states)
+            self.fullstates.extend(x.fullstates)
             self.actions.extend(x.actions)
             self.returns.extend(x_returns)
 
             if len(self) > self.maxlen:
                 st_slice = len(self) - self.maxlen
                 self.states = self.states[st_slice:]
+                self.fullstates = self.fullstates[st_slice:]
                 self.actions = self.actions[st_slice:]
                 self.returns = self.returns[st_slice:]
                 assert len(self) == self.maxlen
@@ -113,6 +124,25 @@ class SILReplayMemory(object):
 
         x.reset()
         assert len(x) == 0
+
+    def extend_one(self, x_states, x_fullstates, x_actions, x_returns):
+        """Use only in exp_buffer memory, add a single batch"""
+        assert not self.priority
+
+        self.states.extend(x_states)
+        self.fullstates.extend(x_fullstates)
+        self.actions.extend(x_actions)
+        self.returns.extend(x_returns)
+
+        if len(self) > self.maxlen:
+            st_slice = len(self) - self.maxlen
+            self.states = self.states[st_slice:]
+            self.fullstates = self.fullstates[st_slice:]
+            self.actions = self.actions[st_slice:]
+            self.returns = self.returns[st_slice:]
+            assert len(self) == self.maxlen
+
+        assert len(self) == len(self.returns) <= self.maxlen
 
     @staticmethod
     def compute_returns(rewards, terminal, gamma, clip=False, c=1.89):
@@ -156,13 +186,15 @@ class SILReplayMemory(object):
         states = np.zeros(shape, dtype=np.uint8)
         actions = np.zeros((batch_size, self.num_actions), dtype=np.float32)
         returns = np.zeros(batch_size, dtype=np.float32)
+        assert self.fs_size != 0
+        fullstates = np.zeros((batch_size, self.fs_size), dtype=np.uint8)
 
         if self.priority:
             sample = self.buff.sample(batch_size, beta)
-            states, acts, returns, weights, idxes = sample
+            states, fullstates, acts, returns, weights, idxes = sample
             for i, a in enumerate(acts):
                 actions[i][a] = 1  # one-hot vector
-            batch = (states, actions, returns)
+            batch = (states, actions, returns, fullstates)
         else:
             weights = np.ones(batch_size, dtype=np.float32)
             idxes = random.sample(range(0, len(self.states)), batch_size)
@@ -170,15 +202,43 @@ class SILReplayMemory(object):
                 states[i] = np.copy(self.states[rand_i])
                 actions[i][self.actions[rand_i]] = 1  # one-hot vector
                 returns[i] = self.returns[rand_i]
-
-            batch = (states, actions, returns)
-
+                fullstates[i] = np.copy(self.fullstates[rand_i])
+            batch = (states, actions, returns, fullstates)
         return idxes, batch, weights
+
+    # def sample_by_actions(self, batch_size, beta=0.4):
+    #     """Return a random batch sample from the exp_buffer (oversampling)."""
+    #     assert len(self) >= batch_size
+    #     assert not self.priority
+    #
+    #     shape = (batch_size, self.height, self.width, self.phi_length)
+    #     states = np.zeros(shape, dtype=np.uint8)
+    #     actions = np.zeros((batch_size, self.num_actions), dtype=np.float32)
+    #     returns = np.zeros(batch_size, dtype=np.float32)
+    #     fullstates = np.zeros((batch_size, len(self.fullstates[0])), dtype=np.uint8)
+    #
+    #     if self.priority:
+    #         sample = self.buff.sample(batch_size, beta)
+    #         states, acts, returns, weights, idxes = sample
+    #         for i, a in enumerate(acts):
+    #             actions[i][a] = 1  # one-hot vector
+    #         batch = (states, actions, returns)
+    #     else:
+    #         weights = np.ones(batch_size, dtype=np.float32)
+    #         idxes = random.sample(range(0, len(self.states)), batch_size)
+    #         for i, rand_i in enumerate(idxes):
+    #             states[i] = np.copy(self.states[rand_i])
+    #             actions[i][self.actions[rand_i]] = 1  # one-hot vector
+    #             returns[i] = self.returns[rand_i]
+    #             fullstates[i] = np.copy(self.fullstates[rand_i])
+    #         batch = (states, actions, returns, fullstates)
+    #     return idxes, batch, weights
 
     def set_weights(self, indexes, priors):
         """Set weights of the samples according to index."""
         if self.priority:
             self.buff.update_priorities(indexes, priors)
+
 
     def __del__(self):
         """Clean up."""

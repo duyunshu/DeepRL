@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import tensorflow as tf
 import time
+import matplotlib.pyplot as plt
 
 from common.game_state import GameState
 from common.game_state import get_wrapper_by_name
@@ -16,6 +17,8 @@ from common.util import transform_h_inv
 from common.util import visualize_cam
 from sil_memory import SILReplayMemory
 from termcolor import colored
+from queue import Queue
+from copy import deepcopy
 
 logger = logging.getLogger("a3c_training_thread")
 
@@ -43,14 +46,18 @@ class A3CTrainingThread(object):
     clip_norm = 0.5
     use_grad_cam = False
     use_sil = False
-    log_idx = 1
+    use_sil_neg = False # test if also using samples that are (G-V<0)
+    # use_correction = False
+    log_idx = 0
     reward_constant = 0
 
     def __init__(self, thread_index, global_net, local_net,
                  initial_learning_rate, learning_rate_input, grad_applier,
                  max_global_time_step, device=None, pretrained_model=None,
-                 pretrained_model_sess=None, advice=False,
-                 reward_shaping=False, sil_thread=False, batch_size=None):
+                 pretrained_model_sess=None, advice=False, correction=False,
+                 reward_shaping=False, sil_thread=False, classify_thread=False,
+                 rollout_thread=False,
+                 batch_size=None, no_op_max=30):
         """Initialize A3CTrainingThread class."""
         assert self.action_size != -1
 
@@ -59,12 +66,32 @@ class A3CTrainingThread(object):
         self.max_global_time_step = max_global_time_step
         self.use_pretrained_model_as_advice = advice
         self.use_pretrained_model_as_reward_shaping = reward_shaping
+        self.use_correction=correction
         self.local_net = local_net
         self.sil_thread = sil_thread
         if self.sil_thread:
             self.batch_size = batch_size
+        self.classify_thread = classify_thread
+        self.rollout_thread = rollout_thread
 
-        logger.info("thread_index: {}".format(self.thread_idx))
+        self.no_op_max = no_op_max
+        self.override_num_noops = 0 if self.no_op_max == 0 else None
+
+        logger.info("===A3C thread_index: {}".format(self.thread_idx))
+        logger.info("device: {}".format(device))
+        logger.info("sil_thread: {}".format(
+            colored(self.sil_thread, "green" if self.sil_thread else "red")))
+        logger.info("classifier_thread: {}".format(
+            colored(self.classify_thread, "green" if self.classify_thread else "red")))
+        logger.info("rollout_thread: {}".format(
+            colored(self.rollout_thread, "green" if self.rollout_thread else "red")))
+        logger.info("use_sil: {}".format(
+            colored(self.use_sil, "green" if self.use_sil else "red")))
+        logger.info("use_sil_neg: {}".format(
+            colored(self.use_sil_neg, "green" if self.use_sil_neg else "red")))
+        logger.info("use_correction: {}".format(
+            colored(self.use_correction, "green" if self.use_correction else "red")))
+
         logger.info("local_t_max: {}".format(self.local_t_max))
         logger.info("use_lstm: {}".format(
             colored(self.use_lstm, "green" if self.use_lstm else "red")))
@@ -87,13 +114,8 @@ class A3CTrainingThread(object):
             colored(self.transformed_bellman,
                     "green" if self.transformed_bellman else "red")))
         logger.info("clip_norm: {}".format(self.clip_norm))
-        logger.info("use_grad_cam: {}".format(
-            colored(self.use_grad_cam,
+        logger.info("use_grad_cam: {}".format(colored(self.use_grad_cam,
                     "green" if self.use_grad_cam else "red")))
-        logger.info("use_sil: {}".format(
-            colored(self.use_sil, "green" if self.use_sil else "red")))
-        logger.info("sil_thread: {}".format(
-            colored(self.sil_thread, "green" if self.sil_thread else "red")))
 
         reward_clipped = True if self.reward_type == 'CLIP' else False
         local_vars = self.local_net.get_vars
@@ -127,7 +149,8 @@ class A3CTrainingThread(object):
                 self.local_net.prepare_sil_loss(entropy_beta=entropy_beta,
                                                 w_loss=w_loss,
                                                 critic_lr=critic_lr,
-                                                min_batch_size=min_batch_size)
+                                                min_batch_size=min_batch_size,
+                                                use_sil_neg = self.use_sil_neg)
                 self.sil_gradients = tf.gradients(
                     self.local_net.total_loss_sil, var_refs)
 
@@ -159,8 +182,9 @@ class A3CTrainingThread(object):
             global_net, upper_layers_only=self.finetune_upper_layers_only)
 
         self.game_state = GameState(env_id=self.env_id, display=False,
-                                    no_op_max=30, human_demo=False,
-                                    episode_life=True)
+                                    no_op_max=self.no_op_max, human_demo=False,
+                                    episode_life=True,
+                                    override_num_noops=self.override_num_noops)
 
         self.local_t = 0
 
@@ -273,12 +297,12 @@ class A3CTrainingThread(object):
             activations, gradients = self.local_net.evaluate_grad_cam(
                 sess, state, action_onehot)
             cam = grad_cam(activations, gradients)
-            cam_img = visualize_cam(cam)
+            cam_img = visualize_cam(cam, shape=self.local_net.in_shape[:-1])
 
             side_by_side = generate_image_for_cam_video(
-                test_cam_si[i],
+                state,
                 cam_img, global_t, i,
-                self.action_meaning[action])
+                self.action_meaning[action], shape=self.local_net.in_shape[0])
 
             cam_side_img.append(side_by_side)
 
@@ -315,6 +339,9 @@ class A3CTrainingThread(object):
         else:
             self.game_state.reset(hard_reset=True)
             max_steps += 4
+            # print(self.game_state.clone_full_state().shape)
+            # self.game_state.env.render()
+            # int(input())
             test_memory = ReplayMemory(
                 84, 84,  # default even if input shape is different
                 np.random.RandomState(),
@@ -341,13 +368,15 @@ class A3CTrainingThread(object):
         episode_steps = 0
         terminal = False
         while True:
-            test_memory_cam.append(self.game_state.s_t)
+            state = cv2.resize(self.game_state.s_t,
+                               self.local_net.in_shape[:-1],
+                               interpolation=cv2.INTER_AREA)
+            test_memory_cam.append(state)
             episode_buffer.append(self.game_state.get_screen_rgb())
             pi_, value_, logits_ = self.local_net.run_policy_and_value(
-                sess, self.game_state.s_t)
+                sess, state)
             action = np.argmax(pi_)
 
-            # take action
             self.game_state.step(action)
             terminal = self.game_state.terminal
             memory_full = episode_steps == max_steps-5
@@ -398,7 +427,8 @@ class A3CTrainingThread(object):
 
         return
 
-    def testing(self, sess, max_steps, global_t, folder, demo_memory_cam=None):
+    def testing(self, sess, max_steps, global_t, folder,
+        demo_memory_cam=None, worker=None):
         """Evaluate A3C."""
         logger.info("Evaluate policy at global_t={}...".format(global_t))
 
@@ -503,7 +533,7 @@ class A3CTrainingThread(object):
 
         self.record_summary(
             score=total_reward, steps=total_steps,
-            episodes=n_episodes, global_t=global_t, mode='Test')
+            episodes=n_episodes, global_t=global_t, mode='A3C_Test')
 
         # reset variables used in training
         self.episode_reward = 0
@@ -522,6 +552,7 @@ class A3CTrainingThread(object):
     def train(self, sess, global_t, train_rewards):
         """Train A3C."""
         states = []
+        fullstates=[]
         actions = []
         rewards = []
         values = []
@@ -543,6 +574,8 @@ class A3CTrainingThread(object):
             state = cv2.resize(self.game_state.s_t,
                                self.local_net.in_shape[:-1],
                                interpolation=cv2.INTER_AREA)
+            fullstate = self.game_state.clone_full_state()
+
             pi_, value_, logits_ = self.local_net.run_policy_and_value(sess,
                                                                        state)
             action = self.pick_action(logits_)
@@ -550,6 +583,8 @@ class A3CTrainingThread(object):
             model_pi = None
             confidence = 0.
             if self.use_pretrained_model_as_advice:
+                assert self.pretrained_model is not None
+
                 if self.psi > 0.001:
                     self.psi = 0.9999 * (0.9999 ** global_t)  # 0.99995 works
                 else:
@@ -568,6 +603,7 @@ class A3CTrainingThread(object):
                         self.advice_ctr += 1
 
             if self.use_pretrained_model_as_reward_shaping:
+                assert self.pretrained_model is not None
                 # if action > 0:
                 if model_pi is None:
                     # TODO(add shape as attribute to pretrained model, fix s_t)
@@ -585,6 +621,7 @@ class A3CTrainingThread(object):
                 # self.shaping_ctr += 1
 
             states.append(state)
+            fullstates.append(fullstate)  # make sure the idx of states and fullstates are the same
             actions.append(action)
             values.append(value_)
 
@@ -623,13 +660,12 @@ class A3CTrainingThread(object):
 
             if self.use_sil:
                 # save states in episode memory
-                self.episode.add_item(self.game_state.s_t, action, reward,
-                                      terminal)
+                self.episode.add_item(self.game_state.s_t, fullstate,
+                                      action, reward, terminal)
 
             if self.reward_type == 'LOG':
                 reward = np.sign(reward) * np.log(1 + np.abs(reward))
             elif self.reward_type == 'CLIP':
-                # clip reward
                 reward = np.sign(reward)
 
             rewards.append(reward)
@@ -643,15 +679,12 @@ class A3CTrainingThread(object):
 
             if terminal:
                 terminal_pseudo = True
-                # if self.use_sil:
-                #     # append episode to SIL memory and reset episode
-                #     self.sil_memory.extend(self.episode)
 
                 env = self.game_state.env
                 name = 'EpisodicLifeEnv'
                 if get_wrapper_by_name(env, name).was_real_done:
-                    log_msg = "train: worker={} global_t={}".format(
-                        self.thread_idx, global_t)
+                    log_msg = "train: worker={} global_t={} local_t={}".format(
+                        self.thread_idx, global_t, self.local_t)
 
                     if self.use_pretrained_model_as_advice:
                         log_msg += " advice_ctr={}".format(self.advice_ctr)
@@ -780,6 +813,7 @@ class A3CTrainingThread(object):
             self.prev_local_t += self.perf_log_interval
             elapsed_time = time.time() - self.start_time
             steps_per_sec = global_t / elapsed_time
+            logger.info("worker-{}, log_worker-{}".format(self.thread_idx, self.log_idx))
             logger.info("Performance : {} STEPS in {:.0f} sec. {:.0f}"
                         " STEPS/sec. {:.2f}M STEPS/hour".format(
                             global_t,  elapsed_time, steps_per_sec,
@@ -797,10 +831,13 @@ class A3CTrainingThread(object):
         sess.run(self.sync)
         cur_learning_rate = self._anneal_learning_rate(global_t)
 
+        goodstate_queue = Queue()
+        badstate_queue = Queue()
+
         for _ in range(m):
             sample = sil_memory.sample(self.batch_size, beta=0.4)
             index_list, batch, weights = sample
-            batch_state, batch_action, batch_returns = batch
+            batch_state, batch_action, batch_returns, batch_fullstate = batch
 
             feed_dict = {
                 self.local_net.s: batch_state,
@@ -815,18 +852,28 @@ class A3CTrainingThread(object):
                 self.sil_apply_gradients_local,
                 ]
             adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
-            sil_memory.set_weights(index_list, adv)
+            sil_memory.set_weights(index_list, adv) # only exec if priority=True
+            # logger.info("advantage: {}".format(adv))
+
+            # find the index of samples
+            if self.use_correction:
+                for i in range(len(index_list)):
+                    if adv[i] <= 0.0:
+                        badstate_queue.put(
+                            (deepcopy(batch_state[i]),
+                             deepcopy(batch_fullstate[i]),
+                             deepcopy(np.argmax(batch_action[i])),
+                             deepcopy(batch_returns[i])))
+                    else:
+                        goodstate_queue.put(
+                            (deepcopy([batch_state[i]]),
+                             deepcopy([batch_fullstate[i]]),
+                             deepcopy([np.argmax(batch_action[i])]),
+                             deepcopy([batch_returns[i]])))
+
             sil_ctr += 1
+        return sil_ctr, goodstate_queue, badstate_queue
 
-            if sil_ctr % 100 == 0:
-                # copy weights from shared to local
-                log_data = (sil_ctr, len(sil_memory))
-                logger.info("SIL: sil_ctr={}"
-                            " sil_memory_size={}".format(*log_data))
-                logger.info("advantage: {}".format(adv))
-                # logger.info("returns: {}".format(batch_returns))
-
-        return sil_ctr
 
     def sil_update_priorities(self, sess, sil_memory, m=4):
         """Self-imitation update priorities."""
@@ -839,7 +886,7 @@ class A3CTrainingThread(object):
         for _ in range(m):
             sample = sil_memory.sample(self.batch_size, beta=0.4)
             index_list, batch, _ = sample
-            batch_state, batch_action, batch_returns = batch
+            batch_state, batch_action, batch_returns, batch_fullstate = batch
 
             feed_dict = {
                 self.local_net.s: batch_state,
@@ -849,6 +896,75 @@ class A3CTrainingThread(object):
             fetch = self.local_net.clipped_advs
             adv = sess.run(fetch, feed_dict=feed_dict)
             sil_memory.set_weights(index_list, adv)
-        # log_data = (m, batchsize, (time.time() - start_time))
-        # logger.info("SIL: priority updates at m={} size={}"
-        #             " --- {} seconds".format(*log_data))
+
+
+    def test_game_classifier(self, global_t, max_steps, sess, worker=None):
+        """Evaluate game with current classifier model."""
+        if not self.classify_thread:
+            assert worker is not None
+        logger.info("Testing classifier at global_t={}...".format(global_t))
+
+        worker.game_state.reset(hard_reset=True)
+
+        # max_steps = 10000
+        total_reward = 0
+        total_steps = 0
+        episode_reward = 0
+        episode_steps = 0
+        n_episodes = 0
+        while max_steps > 0:
+            state = cv2.resize(worker.game_state.s_t,
+                               worker.net.in_shape[:-1],
+                               interpolation=cv2.INTER_AREA)
+            model_pi = worker.net.run_policy(sess, state)
+            action, confidence = worker.choose_action_with_high_confidence(
+                model_pi, exclude_noop=False)
+
+            # take action
+            worker.game_state.step(action)
+            terminal = worker.game_state.terminal
+            episode_reward += worker.game_state.reward
+            episode_steps += 1
+            max_steps -= 1
+
+            # s_t = s_t1
+            worker.game_state.update()
+
+            if terminal:
+                was_real_done = get_wrapper_by_name(
+                    worker.game_state.env, 'EpisodicLifeEnv').was_real_done
+
+                if was_real_done:
+                    n_episodes += 1
+                    score_str = colored("score={}".format(
+                        episode_reward), "magenta")
+                    steps_str = colored("steps={}".format(
+                        episode_steps), "blue")
+                    log_data = (n_episodes, score_str, steps_str,
+                                worker.thread_idx, self.thread_idx, total_steps)
+                    logger.debug("classifier test: trial={} {} {} "
+                                 "test_worker={} cur_worker={} total_steps={}"
+                                 .format(*log_data))
+                    total_reward += episode_reward
+                    total_steps += episode_steps
+                    episode_reward = 0
+                    episode_steps = 0
+
+                worker.game_state.reset(hard_reset=False)
+
+        if n_episodes == 0:
+            total_reward = episode_reward
+            total_steps = episode_steps
+        else:
+            total_reward = total_reward / n_episodes
+            total_steps = total_steps // n_episodes
+
+        log_data = (global_t, worker.thread_idx, self.thread_idx,
+                    total_reward, total_steps, n_episodes)
+        logger.info("classifier test: global_t={} test_worker={} cur_worker={} "
+                    "final score={} final steps={} # trials={}"
+                    .format(*log_data))
+        self.record_summary(
+            score=total_reward, steps=total_steps,
+            episodes=n_episodes, global_t=global_t, mode='Classifier_Test')
+        # return log_data

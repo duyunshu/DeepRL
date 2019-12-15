@@ -14,21 +14,26 @@ from common.game_state import AtariWrapper, FireResetEnv, \
 logger = logging.getLogger("game_state")
 
 class GameState(object):
-    def __init__(self, env_id=None, display=False, no_op_max=30, human_demo=False, episode_life=True):
+    def __init__(self, env_id=None, display=False, no_op_max=30,
+        human_demo=False, episode_life=True, override_num_noops=None):
         assert env_id is not None
         self.display = display or human_demo
         self.env_id = env_id
         self.human_demo = human_demo
         self.fire_reset = False
         self.episode_life = episode_life
+        self.override_num_noops = override_num_noops
 
+        logger.info("gym version:{}".format(gym.__version__))
         env = gym.make(self.env_id)
         assert "NoFrameskip" in env.spec.id
 
         skip = 3 if "SpaceInvaders" in env.spec.id else 4
 
         # necessary for faster simulation
-        env = AtariWrapper(env, noop_max=no_op_max, skip=1 if human_demo else skip)
+        env = AtariWrapper(env, noop_max=no_op_max,
+            skip=1 if human_demo else skip,
+            override_num_noops=self.override_num_noops)
         if not human_demo:
             env = MaxAndSkipEnv(env, skip=skip)
         if episode_life:
@@ -39,7 +44,7 @@ class GameState(object):
         env = WarpFrame(env)
         # override keyboard controls for human demo
         if self.human_demo:
-            env = HumanDemoEnv(env)    
+            env = HumanDemoEnv(env)
             logger.info(env.unwrapped.get_action_meanings())
         self.env = env
 

@@ -126,6 +126,15 @@ def main():
                         action='store_true',
                         help='use human model as advice (Wang et. al)')
     parser.set_defaults(use_pretrained_model_as_advice=False)
+    parser.add_argument('--classify-demo', action='store_true',
+                        help='Use Supervised Classifier')
+    parser.set_defaults(classify_demo=False)
+    parser.add_argument('--sae-classify-demo', action='store_true',
+                        help='Use Supervised Autoencoder')
+    parser.set_defaults(sae_classify_demo=False)
+    parser.add_argument('--ae-classify-demo', action='store_true',
+                        help='Use Autoencoder')
+    parser.set_defaults(ae_classify_demo=False)
     parser.add_argument('--use-pretrained-model-as-reward-shaping',
                         action='store_true',
                         help='use human model as reward shaping (Brys et. al)')
@@ -137,11 +146,51 @@ def main():
     parser.add_argument('--use-sil', action='store_true',
                         help='self imitation learning loss (SIL)')
     parser.set_defaults(use_sil=False)
+    parser.add_argument('--use-sil-neg', action='store_true',
+                        help='test if also use negative samples (G-V)<0')
+    parser.set_defaults(use_sil_neg=False)
+    parser.add_argument('--use-correction', action='store_true',
+                        help='use human model to correct actions')
+    parser.set_defaults(use_correction=False)
     parser.add_argument('--batch-size', type=int, default=512,
                         help='SIL batch size')
     parser.add_argument('--priority-memory', action='store_true',
                         help='Use Prioritized Replay Memory')
     parser.set_defaults(priority_mem=False)
+    parser.add_argument('--memory-length', type=int, default=1000000,
+                        help='SIL memory size')
+
+    # classifier parameters
+    parser.add_argument('--class-train-steps', type=float, default=20000,
+                        help='maximum training steps for classifier')
+    parser.add_argument('--class-l1-beta', type=float, default=0.,
+                        help='L1 regularization beta')
+    parser.add_argument('--class-l2-beta', type=float, default=0.,
+                        help='classifier L2 regularization beta')
+    parser.add_argument('--class-loss-function', type=str, default='mse',
+                        help='classifier mse (mean squared error) or bce (binary cross entropy)')
+    parser.add_argument('--class-learn-rate', type=float, default=7e-4,
+                        help='initial learning rate for RMSProp')
+    parser.add_argument('--class-opt-epsilon', type=float, default=1e-5,
+                        help='epsilon parameter for classifier')
+    parser.add_argument('--class-optimizer', type=str, default='adam',
+                        help='classifier optimizer adam)')
+    parser.add_argument('--class-opt-alpha', type=float, default=0.99,
+                        help='decay parameter for RMS optimizer')
+    parser.add_argument('--class-sl-loss-weight', type=float, default=1.,
+                        help='weighted classification loss')
+    parser.add_argument('--class-use-slv', action='store_true',
+                        help='supervised loss with value loss')
+    parser.set_defaults(class_use_slv=False)
+    parser.add_argument('--class-sample-type', type=str, default=None,
+                        help='None, oversample, proportional')
+    parser.add_argument('--class-tied-weights', action='store_true',
+                        help='Autoencoder with tied weights')
+    parser.set_defaults(tied_weights=False)
+    parser.add_argument('--class-use-denoising', action='store_true')
+    parser.set_defaults(use_denoising=False)
+    parser.add_argument('--class-noise-factor', type=float, default=0.3)
+
 
     args = parser.parse_args()
 
