@@ -8,12 +8,6 @@ Examples:
             --classify-demo --use-mnih-2015
             --train-max-steps=150000 --batch-size=32
 
-    MTL one class vs. all classes
-        $ python3 pretrain/run_experiment.py
-            --gym-env=PongNoFrameskip-v4
-            --classify-demo --onevsall-mtl --use-mnih-2015
-            --train-max-steps=150000 --batch-size=32
-
     Autoencoder
         $ python3 pretrain/run_experiment.py
             --gym-env=PongNoFrameskip-v4
@@ -121,8 +115,6 @@ def main():
     parser.add_argument('--sampling-type', type=str, default=None,
                         help='None, oversample, proportional')
 
-    parser.add_argument('--onevsall-mtl', action='store_true')
-    parser.set_defaults(onevsall_mtl=False)
     parser.add_argument('--exclude-noop', action='store_true')
     parser.set_defaults(exclude_noop=False)
 

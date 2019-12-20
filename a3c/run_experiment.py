@@ -52,9 +52,6 @@ def main():
     parser.add_argument('--gpu-fraction', type=float, default=0.4)
     parser.add_argument('--cuda-devices', type=str, default='')
 
-    parser.add_argument('--use-lstm', action='store_true', help='use LSTM')
-    parser.set_defaults(use_lstm=False)
-
     parser.add_argument('--use-mnih-2015', action='store_true',
                         help='use Mnih et al [2015] network architecture')
     parser.set_defaults(use_mnih_2015=False)
@@ -99,9 +96,6 @@ def main():
     parser.add_argument('--l2-beta', type=float, default=0.,
                         help='L2 regularization beta')
     parser.add_argument('--model-folder', type=str, default=None)
-
-    parser.add_argument('--onevsall-mtl', action='store_true')
-    parser.set_defaults(onevsall_mtl=False)
 
     # Alternatives to reward clipping
     parser.add_argument('--unclipped-reward', action='store_true',

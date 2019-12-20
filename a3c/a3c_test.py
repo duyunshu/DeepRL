@@ -16,6 +16,7 @@ import threading
 import time
 
 from a3c_training_thread import A3CTrainingThread
+from common_worker import CommonWorker
 from common.game_state import GameState
 from common.replay_memory import ReplayMemory
 from common.util import load_memory, prepare_dir
@@ -96,8 +97,7 @@ def run_a3c_test(args):
             demo_cam, _, total_rewards_cam, _ = load_memory(
                 name=None,
                 demo_memory_folder=demo_memory_folder,
-                demo_ids=args.demo_cam_id,
-                imgs_normalized=False)
+                demo_ids=args.demo_cam_id)
 
             demo_cam = demo_cam[int(args.demo_cam_id)]
             logger.info("loaded demo {} for testing CAM".format(
@@ -339,7 +339,8 @@ def run_a3c_test(args):
         if not stop_requested:
             testing_thread.testing_model(
                 sess, args.eval_max_steps, global_t, save_folder,
-                demo_memory_cam=demo_memory_cam, demo_cam_human=demo_cam_human)
+                demo_memory_cam=demo_memory_cam, demo_cam_human=demo_cam_human,
+                worker=testing_thread)
 
     def signal_handler(signal, frame):
         nonlocal stop_requested

@@ -13,12 +13,6 @@ Usage:
             --classify-demo --use-mnih-2015
             --train-max-steps=150000 --batch_size=32
 
-    MTL one class vs. all classes
-        $ python3 pretrain/run_experiment.py
-            --gym-env=PongNoFrameskip-v4
-            --classify-demo --onevsall-mtl --use-mnih-2015
-            --train-max-steps=150000 --batch_size=32
-
 """
 import cv2
 import logging
@@ -35,7 +29,6 @@ from common.util import load_memory
 from common.util import LogFormatter
 from common.util import percent_decrease
 from common.util import solve_weight
-from network import MTLBinaryClassNetwork
 from network import MultiClassNetwork
 from termcolor import colored
 
@@ -47,8 +40,7 @@ class ClassifyDemo(object):
 
     def __init__(self, tf, net, name, train_max_steps, batch_size,
                  grad_applier, eval_freq=5000, demo_memory_folder=None,
-                 demo_ids=None, folder='', exclude_num_demo_ep=0,
-                 use_onevsall=False, device='/cpu:0', clip_norm=None,
+                 demo_ids=None, folder='', exclude_num_demo_ep=0, device='/cpu:0', clip_norm=None,
                  game_state=None, sampling_type=None, reward_constant=0):
         """Initialize ClassifyDemo class."""
         assert demo_ids is not None
@@ -62,7 +54,6 @@ class ClassifyDemo(object):
         self.folder = folder
         self.tf = tf
         self.exclude_num_demo_ep = exclude_num_demo_ep
-        self.use_onevsall = use_onevsall
         self.stop_requested = False
         self.game_state = game_state
         self.best_model_reward = -(sys.maxsize)
@@ -71,7 +62,6 @@ class ClassifyDemo(object):
         logger.info("train_max_steps: {}".format(self.train_max_steps))
         logger.info("batch_size: {}".format(self.batch_size))
         logger.info("eval_freq: {}".format(self.eval_freq))
-        logger.info("use_onevsall: {}".format(self.use_onevsall))
         logger.info("sampling_type: {}".format(
             self.sampling_type))
         logger.info("clip_norm: {}".format(clip_norm))
@@ -94,25 +84,14 @@ class ClassifyDemo(object):
             (size_max_idx_mem, self.net.in_shape[0], self.net.in_shape[1],
              self.demo_memory[max_idx].phi_length), dtype=np.float32)
 
-        if self.use_onevsall:
-            self.test_batch_a = np.zeros(
-                (self.net.action_size, size_max_idx_mem, 2), dtype=np.float32)
-        else:
-            self.test_batch_a = np.zeros(
-                (size_max_idx_mem, self.net.action_size), dtype=np.float32)
+        self.test_batch_a = np.zeros(
+            (size_max_idx_mem, self.net.action_size), dtype=np.float32)
 
         for i in range(size_max_idx_mem):
             s0, a0, _, _, _, _, _, _ = self.demo_memory[max_idx][i]
             self.test_batch_si[i] = cv2.resize(s0, self.net.in_shape[:-1],
                                                interpolation=cv2.INTER_AREA)
-            if self.use_onevsall:
-                for n_class in range(self.net._action_size):
-                    if a0 == n_class:
-                        self.test_batch_a[n_class][i][0] = 1
-                    else:
-                        self.test_batch_a[n_class][i][1] = 1
-            else:
-                self.test_batch_a[i][a0] = 1
+            self.test_batch_a[i][a0] = 1
 
         self.combined_memory = ReplayMemoryReturns(
             height=self.net.in_shape[0],
@@ -152,15 +131,8 @@ class ClassifyDemo(object):
         """
         with self.net.graph.as_default():
             with self.tf.device(device):
-                if self.use_onevsall:
-                    apply_gradients = []
-                    for n_class in range(self.net.action_size):
-                        apply_gradients.append(self.__compute_gradients(
-                            grad_applier[n_class],
-                            self.net.total_loss[n_class], clip_norm))
-                else:
-                    apply_gradients = self.__compute_gradients(
-                        grad_applier, self.net.total_loss, clip_norm)
+                apply_gradients = self.__compute_gradients(
+                    grad_applier, self.net.total_loss, clip_norm)
 
         return apply_gradients
 
@@ -345,75 +317,6 @@ class ClassifyDemo(object):
         # if total_reward >= self.best_model_reward:
         #     self.save_best_model(total_reward, best_saver, sess)
 
-    def train_onevsall(self, sess, summary_op, summary_writer,
-                       exclude_noop=False, best_saver=None):
-        """Train classification with human demonstration (one vs. all).
-
-        This method either does classification training using one class versus
-        all classes.
-
-        Keyword arguments:
-        sess -- tf session
-        summary_op -- tf summary operation
-        summary_writer -- tf summary writer
-        best_saver -- tf saver for best model
-        """
-        assert not self.net.use_slv
-
-        self.max_val = [-(sys.maxsize) for _ in range(self.net.action_size)]
-        train_class_ctr = [0 for _ in range(self.net.action_size)]
-        for i in range(self.train_max_steps + 1):
-            if self.stop_requested:
-                break
-
-            # alternating randomly between classes and reward
-            if exclude_noop:
-                n_class = np.random.randint(1, self.net.action_size)
-            else:
-                n_class = np.random.randint(0, self.net.action_size)
-            train_class_ctr[n_class] += 1
-
-            # train action network branches with logistic regression
-            batch_si, batch_a, _, _ = self.combined_memory.sample2(
-                self.batch_size, normalize=False, n_class=n_class,
-                onevsall=True)
-
-            train_loss, max_value, _ = sess.run(
-                [self.net.total_loss[n_class], self.net.max_value[n_class],
-                 self.apply_gradients[n_class]],
-                feed_dict={self.net.s: batch_si, self.net.a: batch_a})
-
-            if max_value > self.max_val[n_class]:
-                self.max_val[n_class] = max_value
-
-            summary = self.tf.Summary()
-            summary.value.add(tag='Train_Loss/action {}'.format(n_class),
-                              simple_value=float(train_loss))
-
-            if i % self.eval_freq == 0:
-                logger.debug("i={0:} class={1:} loss={2:.4f} max_val={3:}"
-                             .format(i, n_class, train_loss, self.max_val))
-                logger.debug("branch_ctrs={}".format(train_class_ctr))
-
-                for n in range(self.net.action_size):
-                    acc = sess.run(
-                        self.net.accuracy[n],
-                        feed_dict={
-                            self.net.s: self.test_batch_si,
-                            self.net.a: self.test_batch_a[n]})
-                    summary.value.add(tag='Accuracy/action {}'.format(n),
-                                      simple_value=float(acc))
-                    logger.debug("    class={0:} accuracy={1:.4f}"
-                                 .format(n, acc))
-
-            summary_writer.add_summary(summary, i)
-            summary_writer.flush()
-
-        logger.debug("Training stats:")
-        for i in range(self.net.action_size):
-            logger.debug("class {} counter={}".format(i, train_class_ctr[i]))
-
-
 def classify_demo(args):
     """Use supervised learning to learn features from human demo."""
     GYM_ENV_NAME = args.gym_env.replace('-', '_')
@@ -456,8 +359,6 @@ def classify_demo(args):
             end_str += '_same'
         if args.optimizer == 'adam':
             end_str += '_adam'
-        if args.onevsall_mtl:
-            end_str += '_onevsall_mtl'
         if args.exclude_noop:
             end_str += '_exclude_noop'
         if args.exclude_num_demo_ep > 0:
@@ -504,21 +405,13 @@ def classify_demo(args):
     action_size = game_state.env.action_space.n
 
     input_shape = (args.input_shape, args.input_shape, 4)
-    if args.onevsall_mtl:
-        assert not args.use_slv  # Does not support SLV
-        MTLBinaryClassNetwork.use_mnih_2015 = args.use_mnih_2015
-        MTLBinaryClassNetwork.l1_beta = args.l1_beta
-        MTLBinaryClassNetwork.l2_beta = args.l2_beta
-        MTLBinaryClassNetwork.use_gpu = not args.cpu_only
-        network = MTLBinaryClassNetwork(action_size, -1, device)
-    else:
-        MultiClassNetwork.use_mnih_2015 = args.use_mnih_2015
-        MultiClassNetwork.l1_beta = args.l1_beta
-        MultiClassNetwork.l2_beta = args.l2_beta
-        MultiClassNetwork.use_gpu = not args.cpu_only
-        network = MultiClassNetwork(
-            action_size, -1, device, padding=args.padding,
-            in_shape=input_shape, use_slv=args.use_slv)
+    MultiClassNetwork.use_mnih_2015 = args.use_mnih_2015
+    MultiClassNetwork.l1_beta = args.l1_beta
+    MultiClassNetwork.l2_beta = args.l2_beta
+    MultiClassNetwork.use_gpu = not args.cpu_only
+    network = MultiClassNetwork(
+        action_size, -1, device, padding=args.padding,
+        in_shape=input_shape, use_slv=args.use_slv)
 
     logger.info("optimizer: {}".format(
         'RMSPropOptimizer' if args.optimizer == 'rms' else 'AdamOptimizer'))
@@ -532,36 +425,19 @@ def classify_demo(args):
         beta2 = 0.999
 
     with tf.device(device):
-        if args.onevsall_mtl:
-            opt = []
-            for n_optimizer in range(action_size):
-                if args.optimizer == 'rms':
-                    opt.append(tf.train.RMSPropOptimizer(
-                        learning_rate=args.learn_rate,
-                        decay=args.opt_alpha,
-                        epsilon=args.opt_epsilon,
-                        ))
-                else:
-                    opt.append(tf.train.AdamOptimizer(
-                        learning_rate=args.learn_rate,
-                        beta1=beta1, beta2=beta2,
-                        epsilon=args.opt_epsilon,
-                        ))
+        if args.optimizer == 'rms':
+            opt = tf.train.RMSPropOptimizer(
+                learning_rate=args.learn_rate,
+                decay=args.opt_alpha,
+                epsilon=args.opt_epsilon,
+                )
 
-        else:
-            if args.optimizer == 'rms':
-                opt = tf.train.RMSPropOptimizer(
-                    learning_rate=args.learn_rate,
-                    decay=args.opt_alpha,
-                    epsilon=args.opt_epsilon,
-                    )
-
-            else:  # Adam
-                opt = tf.train.AdamOptimizer(
-                    learning_rate=args.learn_rate,
-                    beta1=beta1, beta2=beta2,
-                    epsilon=args.opt_epsilon,
-                    )
+        else:  # Adam
+            opt = tf.train.AdamOptimizer(
+                learning_rate=args.learn_rate,
+                beta1=beta1, beta2=beta2,
+                epsilon=args.opt_epsilon,
+                )
 
     classify_demo = ClassifyDemo(
         tf, network, args.gym_env, int(args.train_max_steps),
@@ -570,7 +446,6 @@ def classify_demo(args):
         demo_ids=args.demo_ids,
         folder=model_folder,
         exclude_num_demo_ep=args.exclude_num_demo_ep,
-        use_onevsall=args.onevsall_mtl,
         device=device, clip_norm=args.grad_norm_clip,
         game_state=game_state,
         sampling_type=args.sampling_type,
@@ -601,13 +476,8 @@ def classify_demo(args):
     signal.signal(signal.SIGINT, signal_handler)
     print('Press Ctrl+C to stop')
 
-    if args.onevsall_mtl:
-        classify_demo.train_onevsall(sess, summary_op, summary_writer,
-                                     exclude_noop=args.exclude_noop,
-                                     best_saver=best_saver)
-    else:
-        classify_demo.train(sess, summary_op, summary_writer,
-                            best_saver=best_saver)
+    classify_demo.train(sess, summary_op, summary_writer,
+                        best_saver=best_saver)
 
     logger.info('Now saving data. Please wait')
     saver.save(sess, str(model_folder / '{}_checkpoint'.format(GYM_ENV_NAME)))

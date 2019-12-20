@@ -19,21 +19,19 @@ from sil_memory import SILReplayMemory
 from termcolor import colored
 from queue import Queue
 from copy import deepcopy
+from common_worker import CommonWorker
 
 logger = logging.getLogger("a3c_training_thread")
 
 
-class RolloutThread(object):
+class RolloutThread(CommonWorker):
     """Rollout Thread Class."""
 
     log_interval = 100
     perf_log_interval = 1000
     local_t_max = 20
-    use_lstm = False
     entropy_beta = 0.01
     gamma = 0.99
-    use_mnih_2015 = False
-    reward_type = 'CLIP'  # CLIP | LOG | RAW
     finetune_upper_layers_only = False
     shaping_reward = 0.001
     shaping_factor = 1.
@@ -52,18 +50,14 @@ class RolloutThread(object):
                  global_a3c, local_a3c,
                  global_pretrained_model, local_pretrained_model,
                  max_global_time_step=0, device=None,
-                 sil_thread=False, classify_thread=False, rollout_thread=True,
                  transformed_bellman=False,
                  no_op_max=0):
         """Initialize A3CTrainingThread class."""
+
+        self.is_rollout_thread = True
         self.action_size = action_size
         self.thread_idx = thread_index
         self.max_global_time_step = max_global_time_step
-        self.sil_thread = sil_thread
-        if self.sil_thread:
-            self.batch_size = batch_size
-        self.classify_thread = classify_thread
-        self.rollout_thread = rollout_thread
         self.transformed_bellman = transformed_bellman
 
         self.no_op_max = no_op_max
@@ -71,16 +65,8 @@ class RolloutThread(object):
 
         logger.info("===ROLLOUT thread_index: {}".format(self.thread_idx))
         logger.info("device: {}".format(device))
-        logger.info("sil_thread: {}".format(
-            colored(self.sil_thread, "green" if self.sil_thread else "red")))
-        logger.info("classifier_thread: {}".format(
-            colored(self.classify_thread, "green" if self.classify_thread else "red")))
-        logger.info("rollout_thread: {}".format(
-            colored(self.rollout_thread, "green" if self.rollout_thread else "red")))
 
         logger.info("local_t_max: {}".format(self.local_t_max))
-        logger.info("use_lstm: {}".format(
-            colored(self.use_lstm, "green" if self.use_lstm else "red")))
         logger.info("action_size: {}".format(self.action_size))
         logger.info("entropy_beta: {}".format(self.entropy_beta))
         logger.info("gamma: {}".format(self.gamma))
@@ -263,8 +249,6 @@ class RolloutThread(object):
                     episode_steps = 0
 
                 worker.game_state.reset(hard_reset=False)
-                if worker.use_lstm:
-                    worker.local_net.reset_state()
 
         if n_episodes == 0:
             total_reward = episode_reward
@@ -289,9 +273,6 @@ class RolloutThread(object):
         worker.episode_steps = 0
         worker.game_state.reset(hard_reset=True)
         worker.last_rho = 0.
-
-        if self.use_lstm:
-            worker.local_net.reset_state()
 
         if worker.use_sil and not worker.sil_thread:
             # ensure no states left from a non-terminating episode

@@ -39,8 +39,7 @@ class AutoencoderClassifyDemo(object):
     def __init__(self, tf, net, net_sess, name, train_max_steps, batch_size,
                  ae_grad_applier, grad_applier, eval_freq=5000,
                  demo_memory_folder=None, demo_ids=None, folder=None,
-                 exclude_num_demo_ep=0, use_onevsall=False,
-                 device='/cpu:0', clip_norm=None, game_state=None,
+                 exclude_num_demo_ep=0, device='/cpu:0', clip_norm=None, game_state=None,
                  sampling_type=None, sl_loss_weight=1.0, reward_constant=0,
                  classify_thread=False, sil_thread=False):
         """Initialize AutoencoderClassifyDemo class."""
@@ -55,7 +54,6 @@ class AutoencoderClassifyDemo(object):
         self.folder = folder
         self.tf = tf
         self.exclude_num_demo_ep = exclude_num_demo_ep
-        self.use_onevsall = use_onevsall
         self.stop_requested = False
         self.game_state = game_state
         self.best_model_reward = -(sys.maxsize)
@@ -67,7 +65,6 @@ class AutoencoderClassifyDemo(object):
         logger.info("train_max_steps: {}".format(self.train_max_steps))
         logger.info("batch_size: {}".format(self.batch_size))
         logger.info("eval_freq: {}".format(self.eval_freq))
-        logger.info("use_onevsall: {}".format(self.use_onevsall))
         logger.info("sampling_type: {}".format(self.sampling_type))
         logger.info("sl_loss_weight: {}".format(sl_loss_weight))
         logger.info("clip_norm: {}".format(clip_norm))
@@ -593,7 +590,6 @@ def ae_classify_demo(args):
         demo_ids=args.demo_ids,
         folder=model_folder,
         exclude_num_demo_ep=args.exclude_num_demo_ep,
-        use_onevsall=args.onevsall_mtl,
         device=device, clip_norm=args.grad_norm_clip,
         game_state=game_state,
         sampling_type=args.sampling_type,

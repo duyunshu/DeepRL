@@ -12,13 +12,6 @@ Usage:
             --gym-env=PongNoFrameskip-v4
             --classify-demo --use-mnih-2015
             --train-max-steps=150000 --batch_size=32
-
-    MTL one class vs. all classes
-        $ python3 pretrain/run_experiment.py
-            --gym-env=PongNoFrameskip-v4
-            --classify-demo --onevsall-mtl --use-mnih-2015
-            --train-max-steps=150000 --batch_size=32
-
 """
 import cv2
 import logging
@@ -38,23 +31,24 @@ from common.util import solve_weight
 from class_network import MultiClassNetwork
 from termcolor import colored
 from copy import deepcopy
+from common_worker import CommonWorker
 
 logger = logging.getLogger("classify_demo")
 
 
-class ClassifyDemo(object):
+class ClassifyDemo(CommonWorker):
     """Use Supervised learning for learning features."""
 
     def __init__(self, tf, net, thread_index, game_name, train_max_steps, batch_size,
                  ae_grad_applier=None, grad_applier=None, eval_freq=5000,
                  demo_memory_folder=None, demo_ids=None, folder=None,
-                 exclude_num_demo_ep=0, use_onevsall=False,
-                 device='/cpu:0', clip_norm=None, game_state=None,
+                 exclude_num_demo_ep=0, device='/cpu:0', clip_norm=None, game_state=None,
                  sampling_type=None, sl_loss_weight=1.0, reward_constant=0,
-                 classify_thread=False, sil_thread=False, rollout_thread=False,
                  exp_buffer=None,):
         """Initialize ClassifyDemo class."""
         assert game_state is not None
+
+        self.is_classify_thread = True
 
         self.net = net
         self.name = game_name
@@ -64,29 +58,18 @@ class ClassifyDemo(object):
         self.folder = folder
         self.tf = tf
         self.exclude_num_demo_ep = exclude_num_demo_ep
-        self.use_onevsall = use_onevsall
         self.stop_requested = False
         self.game_state = game_state
         self.best_model_reward = -(sys.maxsize)
         self.sampling_type = sampling_type
-        self.classify_thread = classify_thread
-        self.sil_thread = False
-        self.rollout_thread = rollout_thread
         self.thread_idx = thread_index
 
         logger.info("===CLASSIFIER thread_index {}".format(self.thread_idx))
         logger.info("device: {}".format(device))
-        logger.info("sil_thread: {}".format(
-            colored(self.sil_thread, "green" if self.sil_thread else "red")))
-        logger.info("classifier_thread: {}".format(
-            colored(self.classify_thread, "green" if self.classify_thread else "red")))
-        logger.info("rollout_thread: {}".format(
-            colored(self.sil_thread, "green" if self.rollout_thread else "red")))
 
         logger.info("train_max_steps: {}".format(self.train_max_steps))
         logger.info("batch_size: {}".format(self.batch_size))
         logger.info("eval_freq: {}".format(self.eval_freq))
-        logger.info("use_onevsall: {}".format(self.use_onevsall))
         logger.info("sampling_type: {}".format(self.sampling_type))
         logger.info("clip_norm: {}".format(clip_norm))
         logger.info("reward_constant: {}".format(reward_constant))
@@ -102,11 +85,7 @@ class ClassifyDemo(object):
 
         self.test_batch_si = deepcopy(batch_state)
 
-        if self.use_onevsall:
-            self.test_batch_a = np.zeros(
-                (self.net.action_size, size_max_idx_mem, 2), dtype=np.float32)
-        else:
-            self.test_batch_a = deepcopy(batch_action)
+        self.test_batch_a = deepcopy(batch_action)
 
         del batch_state, batch_action
 
@@ -120,15 +99,8 @@ class ClassifyDemo(object):
         """
         with self.net.graph.as_default():
             with self.tf.device(device):
-                if self.use_onevsall:
-                    apply_gradients = []
-                    for n_class in range(self.net.action_size):
-                        apply_gradients.append(self.__compute_gradients(
-                            grad_applier[n_class],
-                            self.net.total_loss[n_class], clip_norm))
-                else:
-                    apply_gradients = self.__compute_gradients(
-                        grad_applier, self.net.total_loss, clip_norm)
+                apply_gradients = self.__compute_gradients(
+                    grad_applier, self.net.total_loss, clip_norm)
 
             return apply_gradients
 
@@ -165,27 +137,6 @@ class ClassifyDemo(object):
         best_file = self.folder / 'model_best'
         best_file /= '{}_checkpoint'.format(self.name.replace('-', '_'))
         best_saver.save(sess, str(best_file))
-
-    def set_start_time(self, start_time):
-        """Set start time."""
-        self.start_time = start_time
-
-    def set_summary_writer(self, writer):
-        """Set summary writer."""
-        self.writer = writer
-
-    def record_summary(self, score=0, steps=0, episodes=None, global_t=0, mode='Test'):
-        """Record summary."""
-        summary = tf.Summary()
-        summary.value.add(tag='{}/score'.format(mode),
-                          simple_value=float(score))
-        summary.value.add(tag='{}/steps'.format(mode),
-                          simple_value=float(steps))
-        if episodes is not None:
-            summary.value.add(tag='{}/episodes'.format(mode),
-                              simple_value=float(episodes))
-        self.writer.add_summary(summary, global_t)
-        self.writer.flush()
 
     def choose_action_with_high_confidence(self, pi_values, exclude_noop=True):
         max_confidence_action = np.argmax(pi_values[1 if exclude_noop else 0:])
@@ -263,7 +214,6 @@ class ClassifyDemo(object):
         # return log_data
 
     def train(self, sess, exp_buffer, classify_ctr):
-    #self, sess, summary_op, summary_writer, best_saver=None):
         """Train classification with human demonstration."""
         self.max_val = -(sys.maxsize)
         prev_loss = 0
@@ -410,8 +360,6 @@ class ClassifyDemo(object):
                     episode_steps = 0
 
                 worker.game_state.reset(hard_reset=False)
-                if worker.use_lstm:
-                    worker.local_net.reset_state()
 
         if n_episodes == 0:
             total_reward = episode_reward
@@ -436,9 +384,6 @@ class ClassifyDemo(object):
         worker.episode_steps = 0
         worker.game_state.reset(hard_reset=True)
         worker.last_rho = 0.
-
-        if self.use_lstm:
-            worker.local_net.reset_state()
 
         if worker.use_sil and not worker.sil_thread:
             # ensure no states left from a non-terminating episode
