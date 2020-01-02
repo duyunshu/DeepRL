@@ -113,12 +113,12 @@ class GameACNetwork(ABC):
 
             v_estimate = tf.squeeze(self.v)
 
-            advs = self.returns - v_estimate
+            self.advs = self.returns - v_estimate
             if use_sil_neg:
-                self.clipped_advs = tf.stop_gradient(advs)
+                self.clipped_advs = tf.stop_gradient(self.advs)
             else:
                 self.clipped_advs = tf.stop_gradient(
-                    tf.maximum(tf.zeros_like(advs), advs))
+                    tf.maximum(tf.zeros_like(self.advs), self.advs))
 
             # sil_pg_loss = self.weights * neglogpac * self.clipped_advs
             sil_pg_loss = neglogpac * self.clipped_advs

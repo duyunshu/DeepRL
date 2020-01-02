@@ -24,11 +24,16 @@ class Network(ABC):
     l2_beta = 0.
     use_gpu = True
 
-    def __init__(self, action_size, thread_index, device="/cpu:0"):
+    def __init__(self, action_size, thread_index, device=None):
         """Initialize Network base class."""
         self.action_size = action_size
         self._thread_index = thread_index
-        self._device = device
+        self._device = None
+        if device=="/cpu:0":
+            self._device = device
+            import os
+            os.environ["CUDA_VISIBLE_DEVICES"]="-1"
+
 
     @abstractmethod
     def prepare_loss(self):
@@ -131,13 +136,13 @@ class Network(ABC):
             dst_vars = self.get_vars()
 
         sync_ops = []
-        with tf.device(self._device):
-            with tf.name_scope(name, "Network", []) as name:
-                for(src_var, dst_var) in zip(src_vars, dst_vars):
-                    sync_op = tf.assign(dst_var, src_var)
-                    sync_ops.append(sync_op)
 
-                return tf.group(*sync_ops, name=name)
+        with tf.name_scope(name, "Network", []) as name:
+            for(src_var, dst_var) in zip(src_vars, dst_vars):
+                sync_op = tf.assign(dst_var, src_var)
+                sync_ops.append(sync_op)
+
+            return tf.group(*sync_ops, name=name)
 
     def build_grad_cam_grads(self):
         """Compute Grad-CAM from last convolutional layer after activation.
@@ -199,14 +204,15 @@ class Network(ABC):
 class MultiClassNetwork(Network):
     """Multi-class Classification Network."""
 
-    def __init__(self, pretrain_graph, action_size, thread_index, device="/cpu:0",
+    def __init__(self, pretrain_graph, action_size, thread_index,
                  padding="VALID", in_shape=(84, 84, 4), sae=False,
                  tied_weights=False, use_denoising=False, noise_factor=0.5,
-                 loss_function='mse', use_slv=False):
+                 loss_function='mse', use_slv=False, device=None):
         """Initialize MultiClassNetwork class."""
         Network.__init__(self, action_size, thread_index, device)
         self.graph = pretrain_graph
         logger.info("network: MultiClassNetwork")
+        logger.info("device: {}".format("cpu" if device is not None else "gpu"))
         logger.info("action_size: {}".format(self.action_size))
         logger.info("use_mnih_2015: {}".format(
             colored(self.use_mnih_2015,
@@ -229,7 +235,7 @@ class MultiClassNetwork(Network):
             self.s = tf.placeholder(tf.float32, [None] + list(self.in_shape))
             self.s_n = tf.div(self.s, 255.)
 
-            with tf.device(self._device), tf.variable_scope(scope_name):
+            with tf.variable_scope(scope_name):
                 if self.use_mnih_2015:
                     self.W_conv1, self.b_conv1 = self.conv_variable(
                         [8, 8, 4, 32], layer_name='conv1', gain=np.sqrt(2))
@@ -243,14 +249,6 @@ class MultiClassNetwork(Network):
                     self.W_fc1, self.b_fc1 = self.fc_variable(
                         [fc1_size, self.last_hidden_fc_output_size],
                         layer_name='fc1', gain=np.sqrt(2))
-                    tf.add_to_collection('transfer_params', self.W_conv1)
-                    tf.add_to_collection('transfer_params', self.b_conv1)
-                    tf.add_to_collection('transfer_params', self.W_conv2)
-                    tf.add_to_collection('transfer_params', self.b_conv2)
-                    tf.add_to_collection('transfer_params', self.W_conv3)
-                    tf.add_to_collection('transfer_params', self.b_conv3)
-                    tf.add_to_collection('transfer_params', self.W_fc1)
-                    tf.add_to_collection('transfer_params', self.b_fc1)
                 else:
                     # logger.warn("Does not support SAME padding")
                     # assert self.padding == 'VALID'
@@ -262,26 +260,16 @@ class MultiClassNetwork(Network):
                     self.W_fc1, self.b_fc1 = self.fc_variable(
                         [fc1_size, self.last_hidden_fc_output_size],
                         layer_name='fc1', gain=np.sqrt(2))
-                    tf.add_to_collection('transfer_params', self.W_conv1)
-                    tf.add_to_collection('transfer_params', self.b_conv1)
-                    tf.add_to_collection('transfer_params', self.W_conv2)
-                    tf.add_to_collection('transfer_params', self.b_conv2)
-                    tf.add_to_collection('transfer_params', self.W_fc1)
-                    tf.add_to_collection('transfer_params', self.b_fc1)
 
                 # weight for policy output layer
                 self.W_fc2, self.b_fc2 = self.fc_variable(
                     [self.last_hidden_fc_output_size, action_size],
                     layer_name='fc2')
-                tf.add_to_collection('transfer_params', self.W_fc2)
-                tf.add_to_collection('transfer_params', self.b_fc2)
 
                 if self.use_slv:
                     # weight for value output layer
                     self.W_fc3, self.b_fc3 = self.fc_variable(
                         [self.last_hidden_fc_output_size, 1], layer_name='fc3')
-                    tf.add_to_collection('transfer_params', self.W_fc3)
-                    tf.add_to_collection('transfer_params', self.b_fc3)
 
                 if self.use_mnih_2015:
                     h_conv1 = tf.nn.relu(self.conv2d(
@@ -327,7 +315,7 @@ class MultiClassNetwork(Network):
     def prepare_loss(self, sl_loss_weight=1.0, val_weight=0.01, min_batch_size=4):
         """Prepare tf operations training loss."""
         with self.graph.as_default():
-            with tf.device(self._device), tf.name_scope("class-Loss"):
+            with tf.name_scope("class-Loss"):
                 # taken action (input for policy)
                 self.a = tf.placeholder(tf.float32,
                                         shape=[None, self.action_size])
@@ -419,11 +407,10 @@ class MultiClassNetwork(Network):
     def prepare_evaluate(self):
         """Prepare tf operations for evaluation."""
         with self.graph.as_default():
-            with tf.device(self._device):
-                correct_prediction = tf.equal(
-                    tf.argmax(self.logits, 1), tf.argmax(self.a, 1))
-                self.accuracy = tf.reduce_mean(
-                    tf.cast(correct_prediction, tf.float32))
+            correct_prediction = tf.equal(
+                tf.argmax(self.logits, 1), tf.argmax(self.a, 1))
+            self.accuracy = tf.reduce_mean(
+                tf.cast(correct_prediction, tf.float32))
 
 
 # AutoEncoder-Classification Network

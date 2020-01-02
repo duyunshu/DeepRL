@@ -14,6 +14,8 @@ from termcolor import colored
 from queue import Queue
 from copy import deepcopy
 from common_worker import CommonWorker
+from sil_memory import SILReplayMemory
+from datetime import datetime
 
 logger = logging.getLogger("sil_training_thread")
 
@@ -31,27 +33,24 @@ class SILTrainingThread(CommonWorker):
 
     def __init__(self, thread_index, global_net, local_net,
                  initial_learning_rate, learning_rate_input, grad_applier,
-                 max_global_time_step, device=None,
-                 batch_size=None, no_op_max=30):
+                 device=None, batch_size=None,
+                 use_rollout=False, train_classifier=False):
         """Initialize A3CTrainingThread class."""
         assert self.action_size != -1
 
         self.is_sil_thread = True
         self.thread_idx = thread_index
+        self.initial_learning_rate = initial_learning_rate
         self.learning_rate_input = learning_rate_input
-        self.max_global_time_step = max_global_time_step
         self.local_net = local_net
         self.batch_size = batch_size
+        self.use_rollout=use_rollout
+        self.train_classifier=train_classifier
 
-        self.no_op_max = no_op_max
-        self.override_num_noops = 0 if self.no_op_max == 0 else None
-
-        logger.info("===SIL thread_index: {}".format(self.thread_idx))
+        logger.info("===SIL thread_index: {}===".format(self.thread_idx))
         logger.info("device: {}".format(device))
-
         logger.info("use_sil_neg: {}".format(
             colored(self.use_sil_neg, "green" if self.use_sil_neg else "red")))
-
         logger.info("action_size: {}".format(self.action_size))
         logger.info("entropy_beta: {}".format(self.entropy_beta))
         logger.info("gamma: {}".format(self.gamma))
@@ -67,6 +66,7 @@ class SILTrainingThread(CommonWorker):
                     "green" if self.use_grad_cam else "red")))
 
         reward_clipped = True if self.reward_type == 'CLIP' else False
+
         local_vars = self.local_net.get_vars
         if self.finetune_upper_layers_only:
             local_vars = self.local_net.get_vars_upper
@@ -84,14 +84,18 @@ class SILTrainingThread(CommonWorker):
 
             logger.info("sil batch_size: {}".format(self.batch_size))
             logger.info("sil min_batch_size: {}".format(min_batch_size))
-            logger.info("sil w_loss: {}".format(critic_lr))
+            logger.info("sil w_loss: {}".format(w_loss))
             logger.info("sil critic_lr: {}".format(critic_lr))
             logger.info("sil entropy_beta: {}".format(entropy_beta))
+
             self.local_net.prepare_sil_loss(entropy_beta=entropy_beta,
                                             w_loss=w_loss,
                                             critic_lr=critic_lr,
                                             min_batch_size=min_batch_size,
                                             use_sil_neg = self.use_sil_neg)
+
+            var_refs = [v._ref() for v in local_vars()]
+
             self.sil_gradients = tf.gradients(
                 self.local_net.total_loss_sil, var_refs)
 
@@ -115,49 +119,68 @@ class SILTrainingThread(CommonWorker):
         self.sync = self.local_net.sync_from(
             global_net, upper_layers_only=self.finetune_upper_layers_only)
 
-        self.game_state = GameState(env_id=self.env_id, display=False,
-                                    no_op_max=self.no_op_max, human_demo=False,
-                                    episode_life=True,
-                                    override_num_noops=self.override_num_noops)
-
-        self.local_t = 0
-
-        self.initial_learning_rate = initial_learning_rate
-
-        self.episode_reward = 0
-        self.episode_steps = 0
-
-        # variable controlling log output
-        self.prev_local_t = 0
+        self.episode = SILReplayMemory(
+            self.action_size, max_len=None, gamma=self.gamma,
+            clip=reward_clipped,
+            height=self.local_net.in_shape[0],
+            width=self.local_net.in_shape[1],
+            phi_length=self.local_net.in_shape[2],
+            reward_constant=self.reward_constant)
 
         with tf.device(device):
             if self.use_grad_cam:
+                self.game_state = GameState(env_id=self.env_id, display=False,
+                                            no_op_max=30, human_demo=False,
+                                            episode_life=True, override_num_noops=None)
                 self.action_meaning = self.game_state.env.unwrapped \
                     .get_action_meanings()
                 self.local_net.build_grad_cam_grads()
 
-    def _anneal_learning_rate(self, global_time_step):
-        learning_rate = self.initial_learning_rate \
-            * (self.max_global_time_step - global_time_step) \
-            / self.max_global_time_step
-        if learning_rate < 0.0:
-            learning_rate = 0.0
-        return learning_rate
+
+    def record_sil(self, sil_ctr=0, total_used=0, rollout_sampled=0,
+                   rollout_used=0, goods=0, bads=0, global_t=0, mode='SIL'):
+        """Record SIL."""
+        summary = tf.Summary()
+        summary.value.add(tag='{}/sil_ctr'.format(mode),
+                          simple_value=float(sil_ctr))
+
+        summary.value.add(tag='{}/total_num_sample_used'.format(mode),
+                          simple_value=float(total_used))
+        summary.value.add(tag='{}/num_rollout_sampled'.format(mode),
+                          simple_value=float(rollout_sampled))
+        summary.value.add(tag='{}/num_rollout_used'.format(mode),
+                          simple_value=float(rollout_used))
+        summary.value.add(tag='{}/goodstate_size'.format(mode),
+                          simple_value=float(goods))
+        summary.value.add(tag='{}/badstate_size'.format(mode),
+                          simple_value=float(bads))
+
+        self.writer.add_summary(summary, global_t)
+        self.writer.flush()
 
     def sil_train(self, sess, global_t, sil_memory, sil_ctr, m=4):
         """Self-imitation learning process."""
 
         # copy weights from shared to local
         sess.run(self.sync)
-        cur_learning_rate = self._anneal_learning_rate(global_t)
+        cur_learning_rate = self._anneal_learning_rate(
+                global_t,
+                self.initial_learning_rate)
 
-        goodstate_queue = Queue()
         badstate_queue = Queue()
+        goodstate_queue = Queue()
+        total_used = 0
+        num_rollout_sampled = 0
+        num_rollout_used = 0
 
-        for _ in range(m):
+        for mm in range(m):
             sample = sil_memory.sample(self.batch_size, beta=0.4)
             index_list, batch, weights = sample
-            batch_state, batch_action, batch_returns, batch_fullstate = batch
+            batch_state, batch_action, batch_returns, \
+                batch_fullstate, batch_rollout = batch
+
+            if self.use_rollout:
+                num_rollout_sampled += np.sum(batch_rollout)
 
             feed_dict = {
                 self.local_net.s: batch_state,
@@ -168,36 +191,52 @@ class SILTrainingThread(CommonWorker):
                 }
             fetch = [
                 self.local_net.clipped_advs,
+                self.local_net.advs,
                 self.sil_apply_gradients,
                 self.sil_apply_gradients_local,
                 ]
-            adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
-            sil_memory.set_weights(index_list, adv) # only exec if priority=True
-            # logger.info("advantage: {}".format(adv))
+            adv_clip, adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
+            sil_memory.set_weights(index_list, adv_clip)
+            # logger.info("adv_clip: {}".format(adv_clip))
+            # logger.info("adv_raw: {}".format(adv))
+
+            if self.use_rollout or self.train_classifier:
+                pos_idx = [i for (i, num) in enumerate(adv) if num > 0]
+                neg_idx = [i for (i, num) in enumerate(adv) if num <= 0]
+                total_used += len(pos_idx)
+                num_rollout_used += np.sum(np.take(batch_rollout, pos_idx))
 
             # find the index of samples
-            if self.use_correction:
-                for i in range(len(index_list)):
-                    if adv[i] <= 0.0:
-                        badstate_queue.put(
-                            (deepcopy(batch_state[i]),
-                             deepcopy(batch_fullstate[i]),
-                             deepcopy(np.argmax(batch_action[i])),
-                             deepcopy(batch_returns[i])))
-                    else:
-                        goodstate_queue.put(
-                            (deepcopy([batch_state[i]]),
-                             deepcopy([batch_fullstate[i]]),
-                             deepcopy([np.argmax(batch_action[i])]),
-                             deepcopy([batch_returns[i]])))
+            if self.train_classifier:
+                for max_adv_idx in pos_idx:
+                    goodstate_queue.put(
+                        (deepcopy([ batch_state[max_adv_idx] ]),
+                         deepcopy([ batch_fullstate[max_adv_idx] ]),
+                         deepcopy([ np.argmax(batch_action[max_adv_idx ]) ]),
+                         deepcopy([ batch_returns[max_adv_idx] ]),
+                         deepcopy([ batch_rollout[max_adv_idx] ]))
+                        )
+            if self.use_rollout:
+                for (i, min_adv_idx) in enumerate(neg_idx):
+                    badstate_queue.put(
+                         (  adv[min_adv_idx], #first sort by adv
+                            -(int(datetime.now().second + datetime.now().microsecond)),  #if adv same, sort by newest first
+                            (deepcopy(batch_state[min_adv_idx]),
+                             deepcopy(batch_fullstate[min_adv_idx]),
+                             deepcopy(np.argmax(batch_action[min_adv_idx])),
+                             deepcopy(batch_returns[min_adv_idx]),
+                             deepcopy(batch_rollout[min_adv_idx]))
+                         )
+                        )
 
             sil_ctr += 1
-        return sil_ctr, goodstate_queue, badstate_queue
+
+        return sil_ctr, total_used, num_rollout_sampled , num_rollout_used, \
+                goodstate_queue, badstate_queue
 
 
     def sil_update_priorities(self, sess, sil_memory, m=4):
         """Self-imitation update priorities."""
-
         # copy weights from shared to local
         sess.run(self.sync)
 
@@ -215,4 +254,3 @@ class SILTrainingThread(CommonWorker):
             fetch = self.local_net.clipped_advs
             adv = sess.run(fetch, feed_dict=feed_dict)
             sil_memory.set_weights(index_list, adv)
-

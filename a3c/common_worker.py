@@ -19,8 +19,10 @@ class CommonWorker(object):
     is_rollout_thread = False
     thread_idx = -1
     action_size = -1
-    reward_type = 'CLIP'  # CLIP | LOG | RAW
+    reward_type = 'CLIP' # CLIP | LOG | RAW
     env_id = None
+    reward_constant = 0
+    max_global_time_step=0
 
     def pick_action(self, logits):
         """Choose action probabilistically.
@@ -45,6 +47,15 @@ class CommonWorker(object):
         """Set summary writer."""
         self.writer = writer
 
+    def _anneal_learning_rate(self, global_time_step, initial_learning_rate):
+        learning_rate = initial_learning_rate * \
+        (self.max_global_time_step - global_time_step) / \
+        self.max_global_time_step
+        if learning_rate < 0.0:
+            learning_rate = 0.0
+        return learning_rate
+
+
     def record_summary(self, score=0, steps=0, episodes=None, global_t=0,
                        mode='Test'):
         """Record summary."""
@@ -59,9 +70,10 @@ class CommonWorker(object):
         self.writer.add_summary(summary, global_t)
         self.writer.flush()
 
-    def testing(self, sess, max_steps, global_t, folder,
-        demo_memory_cam=None, worker=None):
+    def testing(self, sess, max_steps, global_t, folder, demo_memory_cam=None,
+                worker=None):
         """Evaluate A3C."""
+        assert worker is not None
         assert not worker.is_classify_thread
         assert not worker.is_rollout_thread
         assert not worker.is_sil_thread
@@ -328,15 +340,15 @@ class CommonWorker(object):
 
         return
 
-    def test_game_classifier(self, global_t, max_steps, sess, worker=None):
+    def test_retrain_classifier(self, global_t, max_steps, sess, worker=None):
         """Evaluate game with current classifier model."""
+        assert worker is not None
         assert worker.is_classify_thread
 
-        logger.info("Testing classifier at global_t={}...".format(global_t))
+        logger.info("Testing (retrained) classifier at global_t={}...".format(global_t))
 
         worker.game_state.reset(hard_reset=True)
 
-        # max_steps = 10000
         total_reward = 0
         total_steps = 0
         episode_reward = 0
@@ -391,10 +403,80 @@ class CommonWorker(object):
 
         log_data = (global_t, worker.thread_idx, self.thread_idx,
                     total_reward, total_steps, n_episodes)
+        logger.info("(retrained) classifier test: global_t={} test_worker={} cur_worker={} "
+                    "final score={} final steps={} # trials={}"
+                    .format(*log_data))
+        self.record_summary(
+            score=total_reward, steps=total_steps,
+            episodes=n_episodes, global_t=global_t, mode='Classifier_Test')
+
+    def test_fixed_classifier(self, global_t, max_steps, sess, worker=None, model=None):
+        """Evaluate game with current classifier model."""
+        assert model is not None
+        assert sess is not None
+        assert worker is not None
+
+        logger.info("Testing (fixed) classifier at global_t={}...".format(global_t))
+
+        worker.game_state.reset(hard_reset=True)
+
+        total_reward = 0
+        total_steps = 0
+        episode_reward = 0
+        episode_steps = 0
+        n_episodes = 0
+        while max_steps > 0:
+            state = cv2.resize(worker.game_state.s_t,
+                               model.in_shape[:-1],
+                               interpolation=cv2.INTER_AREA)
+            model_pi = model.run_policy(sess, state)
+            action, confidence = self.choose_action_with_high_confidence(
+                model_pi, exclude_noop=False)
+
+            # take action
+            worker.game_state.step(action)
+            terminal = worker.game_state.terminal
+            episode_reward += worker.game_state.reward
+            episode_steps += 1
+            max_steps -= 1
+
+            # s_t = s_t1
+            worker.game_state.update()
+
+            if terminal:
+                was_real_done = get_wrapper_by_name(
+                    worker.game_state.env, 'EpisodicLifeEnv').was_real_done
+
+                if was_real_done:
+                    n_episodes += 1
+                    score_str = colored("score={}".format(
+                        episode_reward), "magenta")
+                    steps_str = colored("steps={}".format(
+                        episode_steps), "blue")
+                    log_data = (n_episodes, score_str, steps_str,
+                                worker.thread_idx, self.thread_idx, total_steps)
+                    logger.debug("(fixed) classifier test: trial={} {} {} "
+                                    "test_worker={} cur_worker={} total_steps={}"
+                                    .format(*log_data))
+                    total_reward += episode_reward
+                    total_steps += episode_steps
+                    episode_reward = 0
+                    episode_steps = 0
+
+                worker.game_state.reset(hard_reset=False)
+
+        if n_episodes == 0:
+            total_reward = episode_reward
+            total_steps = episode_steps
+        else:
+            total_reward = total_reward / n_episodes
+            total_steps = total_steps // n_episodes
+
+        log_data = (global_t, worker.thread_idx, self.thread_idx,
+                    total_reward, total_steps, n_episodes)
         logger.info("classifier test: global_t={} test_worker={} cur_worker={} "
                     "final score={} final steps={} # trials={}"
                     .format(*log_data))
         self.record_summary(
             score=total_reward, steps=total_steps,
             episodes=n_episodes, global_t=global_t, mode='Classifier_Test')
-        # return log_data

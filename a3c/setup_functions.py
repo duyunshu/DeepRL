@@ -6,31 +6,20 @@ from common.util import load_memory
 
 logger = logging.getLogger("a3c")
 
-def setup_tf(use_gpu, cuda_devices):
-    if use_gpu:
-        assert cuda_devices != ''
-        os.environ['CUDA_VISIBLE_DEVICES'] = cuda_devices
-    else:
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    import tensorflow as tf
-    return tf
-
 def setup_folder(args, env_name):
-    if not os.path.exists('scratch/cluster/yunshu/results/a3c'):
-        os.makedirs('scratch/cluster/yunshu/results/a3c')
+    if not os.path.exists(args.save_to+"a3c/"):
+        os.makedirs(args.save_to+"a3c/")
 
     if args.folder is not None:
-        folder = 'scratch/cluster/yunshu/results/a3c/{}_{}'.format(env_name, args.folder)
+        folder = args.save_to+'a3c/{}_{}'.format(env_name, args.folder)
     else:
-        folder = 'scratch/cluster/yunshu/results/a3c/{}'.format(env_name)
+        folder = args.save_to+'a3c/{}'.format(env_name)
         end_str = ''
 
         if args.use_mnih_2015:
             end_str += '_mnih2015'
         if args.padding == 'SAME':
             end_str += '_same'
-        if args.use_lstm:
-            end_str += '_lstm'
         if args.unclipped_reward:
             end_str += '_rawreward'
         elif args.log_scale_reward:
@@ -51,20 +40,22 @@ def setup_folder(args, env_name):
         if args.finetune_upper_layers_only:
             end_str += '_tune_upperlayers'
 
-        if args.load_pretrained_model:
-            if args.use_pretrained_model_as_advice:
-                end_str += '_modelasadvice'
-            if args.use_pretrained_model_as_reward_shaping:
-                end_str += '_modelasshaping'
-            if args.use_correction:
-                end_str+='_usecorrection'
-
         if args.use_sil:
             end_str += '_sil'
             if args.priority_memory:
                 end_str += '_prioritymem'
             if args.use_sil_neg:
                 end_str+= '_usenegsample'
+
+        if args.load_pretrained_model:
+            end_str+='_loadmodel'
+            if args.train_classifier:
+                end_str+='_trainmodel'
+            else:
+                end_str+='_fixmodel'
+
+        if args.use_rollout:
+            end_str+='_rollout'
 
         folder += end_str
 
@@ -108,104 +99,93 @@ def setup_demo_memory_cam(is_load_demo_cam, demo_cam_id, folder):
             s0 = (demo_cam[i])[0]
             demo_memory_cam[i] = np.copy(s0)
         del demo_cam
-    
+
     return demo_memory_cam
 
 def setup_gpu(tf, use_gpu, gpu_fraction):
-    device_gpu = ""
     gpu_options = None
     if use_gpu:
-        device_gpu = "/gpu:"+os.environ["CUDA_VISIBLE_DEVICES"]
         gpu_options = tf.GPUOptions(
             per_process_gpu_memory_fraction=gpu_fraction)
-    return device_gpu, gpu_options
+    return gpu_options
 
-def setup_pretrained_model(tf, args, action_size, device, in_shape):
-    pretrain_graph = None
+def setup_pretrained_model(tf, args, action_size, in_shape, device=None):
     pretrain_model = None
-    if args.load_pretrained_model:
-        pretrain_graph = tf.Graph()
-        if args.onevsall_mtl:
-            logger.error("Not supported yet!")
-            assert False
-            # from game_class_network import MTLBinaryClassNetwork \
-            #     as PretrainedModelNetwork
-        else:
-            if args.sae_classify_demo:
-                # from class_network import AutoEncoderNetwork \
-                #     as PretrainedModelNetwork
-                logger.error("NotImplemented!")
-                assert False
-            elif args.classify_demo:
-                from class_network import MultiClassNetwork \
-                    as PretrainedModelNetwork
-            else:
-                logger.error("Classification type Not supported yet!")
-                assert False
+    pretrain_graph = tf.Graph()
+    if args.sae_classify_demo:
+        # from class_network import AutoEncoderNetwork \
+        #     as PretrainedModelNetwork
+        logger.error("NotImplemented!")
+        assert False
+    elif args.classify_demo:
+        from class_network import MultiClassNetwork \
+            as PretrainedModelNetwork
+    else:
+        logger.error("Classification type Not supported yet!")
+        assert False
 
-        PretrainedModelNetwork.use_mnih_2015 = args.use_mnih_2015
-        PretrainedModelNetwork.l1_beta = args.class_l1_beta
-        PretrainedModelNetwork.l2_beta = args.class_l2_beta
-        PretrainedModelNetwork.use_gpu = args.use_gpu
-        # pretrained_model thread has to be -1!
-        pretrain_model = PretrainedModelNetwork(
-            pretrain_graph, action_size, -1,
-            device=device, padding=args.padding,
-            in_shape=in_shape, sae=args.sae_classify_demo,
-            tied_weights=args.class_tied_weights,
-            use_denoising=args.class_use_denoising,
-            noise_factor=args.class_noise_factor,
-            loss_function=args.class_loss_function,
-            use_slv=args.class_use_slv)
+    PretrainedModelNetwork.use_mnih_2015 = args.use_mnih_2015
+    PretrainedModelNetwork.l1_beta = args.class_l1_beta
+    PretrainedModelNetwork.l2_beta = args.class_l2_beta
+    PretrainedModelNetwork.use_gpu = args.use_gpu
+    # pretrained_model thread has to be -1!
+    pretrain_model = PretrainedModelNetwork(
+        pretrain_graph, action_size, -1,
+        padding=args.padding,
+        in_shape=in_shape, sae=args.sae_classify_demo,
+        tied_weights=args.class_tied_weights,
+        use_denoising=args.class_use_denoising,
+        noise_factor=args.class_noise_factor,
+        loss_function=args.class_loss_function,
+        use_slv=args.class_use_slv, device=device)
 
     return pretrain_graph, pretrain_model
 
-def setup_class_optimizer(tf, args, device):
+def setup_class_optimizer(tf, args):
     ae_opt = None
     opt = None
-    if args.load_pretrained_model:
-        # class optimizer
-        with tf.device(device):
-            if args.class_optimizer == 'rms':
-                if args.ae_classify_demo:
-                    ae_opt = tf.train.RMSPropOptimizer(
-                        learning_rate=args.class_learn_rate,
-                        decay=args.class_opt_alpha,
-                        epsilon=args.class_opt_epsilon,
-                        )
-                opt = tf.train.RMSPropOptimizer(
-                    learning_rate=args.class_learn_rate,
-                    decay=args.class_opt_alpha,
-                    epsilon=args.class_opt_epsilon,
-                    )
+    if args.class_optimizer == 'rms':
+        if args.ae_classify_demo:
+            ae_opt = tf.train.RMSPropOptimizer(
+                learning_rate=args.class_learn_rate,
+                decay=args.class_opt_alpha,
+                epsilon=args.class_opt_epsilon,
+                )
+        opt = tf.train.RMSPropOptimizer(
+            learning_rate=args.class_learn_rate,
+            decay=args.class_opt_alpha,
+            epsilon=args.class_opt_epsilon,
+            )
 
-            else:  # Adam
-                # Tensorflow defaults
-                beta1 = 0.9
-                beta2 = 0.999
-                if args.ae_classify_demo:
-                    ae_opt = tf.train.AdamOptimizer(
-                        learning_rate=args.class_learn_rate,
-                        beta1=beta1, beta2=beta2,
-                        epsilon=args.class_opt_epsilon,
-                        )
-                opt = tf.train.AdamOptimizer(
-                    learning_rate=args.class_learn_rate,
-                    beta1=beta1, beta2=beta2,
-                    epsilon=args.class_opt_epsilon,
-                    )
+    else:  # Adam
+        # Tensorflow defaults
+        beta1 = 0.9
+        beta2 = 0.999
+        if args.ae_classify_demo:
+            ae_opt = tf.train.AdamOptimizer(
+                learning_rate=args.class_learn_rate,
+                beta1=beta1, beta2=beta2,
+                epsilon=args.class_opt_epsilon,
+                )
+        opt = tf.train.AdamOptimizer(
+            learning_rate=args.class_learn_rate,
+            beta1=beta1, beta2=beta2,
+            epsilon=args.class_opt_epsilon,
+            )
     return ae_opt, opt
 
 def setup_common_worker(CommonWorker, args, action_size):
     CommonWorker.action_size = action_size
     CommonWorker.env_id = args.gym_env
+    CommonWorker.reward_constant = args.reward_constant
+    CommonWorker.max_global_time_step = args.max_time_step
     if args.unclipped_reward:
         CommonWorker.reward_type = "RAW"
     elif args.log_scale_reward:
         CommonWorker.reward_type = "LOG"
     else:
         CommonWorker.reward_type = "CLIP"
-    return CommonWorker
+    # return CommonWorker
 
 def setup_a3c_worker(A3CTrainingThread, args, log_idx):
     A3CTrainingThread.log_interval = args.log_interval
@@ -220,7 +200,6 @@ def setup_a3c_worker(A3CTrainingThread, args, log_idx):
     A3CTrainingThread.use_grad_cam = args.use_grad_cam
     A3CTrainingThread.use_sil = args.use_sil
     A3CTrainingThread.use_sil_neg = args.use_sil_neg  # test if also using samples that are (G-V<0)
-    A3CTrainingThread.use_correction = args.use_correction
     A3CTrainingThread.log_idx = log_idx
     A3CTrainingThread.reward_constant = args.reward_constant
 

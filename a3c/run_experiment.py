@@ -21,6 +21,9 @@ def main():
     parser.add_argument('--gym-env', type=str, default='PongNoFrameskip-v4',
                         help='OpenAi Gym environment ID')
 
+    parser.add_argument('--save-to', type=str, default='results/',
+                        help='where to save results')
+
     parser.add_argument('--local-t-max', type=int, default=20,
                         help='repeat step size')
     parser.add_argument('--rmsp-alpha', type=float, default=0.99,
@@ -43,6 +46,9 @@ def main():
                         help='ovverides maximum time step by a fraction')
     parser.add_argument('--grad-norm-clip', type=float, default=0.5,
                         help='gradient norm clipping')
+
+    parser.add_argument('--advice-budget', type=float, default=10 * 10**7,
+                        help='max global_steps allowed for rollout')
 
     parser.add_argument('--eval-freq', type=int, default=1000000)
     parser.add_argument('--eval-max-steps', type=int, default=125000)
@@ -116,10 +122,6 @@ def main():
     parser.add_argument('--load-pretrained-model', action='store_true')
     parser.set_defaults(load_pretrained_model=False)
     parser.add_argument('--pretrained-model-folder', type=str, default=None)
-    parser.add_argument('--use-pretrained-model-as-advice',
-                        action='store_true',
-                        help='use human model as advice (Wang et. al)')
-    parser.set_defaults(use_pretrained_model_as_advice=False)
     parser.add_argument('--classify-demo', action='store_true',
                         help='Use Supervised Classifier')
     parser.set_defaults(classify_demo=False)
@@ -129,10 +131,6 @@ def main():
     parser.add_argument('--ae-classify-demo', action='store_true',
                         help='Use Autoencoder')
     parser.set_defaults(ae_classify_demo=False)
-    parser.add_argument('--use-pretrained-model-as-reward-shaping',
-                        action='store_true',
-                        help='use human model as reward shaping (Brys et. al)')
-    parser.set_defaults(use_pretrained_model_as_reward_shaping=False)
 
     parser.add_argument('--test-model', action='store_true')
     parser.set_defaults(test_model=False)
@@ -143,15 +141,18 @@ def main():
     parser.add_argument('--use-sil-neg', action='store_true',
                         help='test if also use negative samples (G-V)<0')
     parser.set_defaults(use_sil_neg=False)
-    parser.add_argument('--use-correction', action='store_true',
+    parser.add_argument('--use-rollout', action='store_true',
                         help='use human model to correct actions')
-    parser.set_defaults(use_correction=False)
+    parser.set_defaults(use_rollout=False)
+    parser.add_argument('--train-classifier', action='store_true',
+                        help='periodically retrain classifier')
+    parser.set_defaults(train_classifier=False)
     parser.add_argument('--batch-size', type=int, default=512,
                         help='SIL batch size')
     parser.add_argument('--priority-memory', action='store_true',
                         help='Use Prioritized Replay Memory')
     parser.set_defaults(priority_mem=False)
-    parser.add_argument('--memory-length', type=int, default=1000000,
+    parser.add_argument('--memory-length', type=int, default=100000,
                         help='SIL memory size')
 
     # classifier parameters
