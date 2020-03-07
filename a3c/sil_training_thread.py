@@ -34,7 +34,7 @@ class SILTrainingThread(CommonWorker):
     def __init__(self, thread_index, global_net, local_net,
                  initial_learning_rate, learning_rate_input, grad_applier,
                  device=None, batch_size=None,
-                 use_rollout=False, train_classifier=False):
+                 use_rollout=False, train_classifier=False, use_sil_neg=False):
         """Initialize A3CTrainingThread class."""
         assert self.action_size != -1
 
@@ -46,6 +46,8 @@ class SILTrainingThread(CommonWorker):
         self.batch_size = batch_size
         self.use_rollout=use_rollout
         self.train_classifier=train_classifier
+        self.use_sil_neg = use_sil_neg
+        # self._device = device
 
         logger.info("===SIL thread_index: {}===".format(self.thread_idx))
         logger.info("device: {}".format(device))
@@ -158,7 +160,8 @@ class SILTrainingThread(CommonWorker):
         self.writer.add_summary(summary, global_t)
         self.writer.flush()
 
-    def sil_train(self, sess, global_t, sil_memory, sil_ctr, m=4):
+    def sil_train(self, sess, global_t, sil_memory, sil_ctr, m=4,
+                  rollout_buffer=None, rollout_proportion=0, stop_rollout=False):
         """Self-imitation learning process."""
 
         # copy weights from shared to local
@@ -173,14 +176,28 @@ class SILTrainingThread(CommonWorker):
         num_rollout_sampled = 0
         num_rollout_used = 0
 
-        for mm in range(m):
-            sample = sil_memory.sample(self.batch_size, beta=0.4)
+        for _ in range(m):
+            r_batch_size = 0
+            if rollout_buffer is not None and rollout_proportion>0:
+                r_batch_size = min(len(rollout_buffer),
+                                   int(self.batch_size * rollout_proportion))
+                # print("ROLLOUT sample size: {}".format(r_batch_size))
+                if r_batch_size > 0:
+                    r_sample = rollout_buffer.sample(r_batch_size, beta=0.4)
+                    r_index_list, r_batch, r_weights = r_sample
+                    r_batch_state, r_batch_action, r_batch_returns, \
+                        r_batch_fullstate, r_batch_rollout = r_batch
+
+            s_batch_size = self.batch_size - r_batch_size
+            sample = sil_memory.sample(s_batch_size , beta=0.4)
             index_list, batch, weights = sample
             batch_state, batch_action, batch_returns, \
                 batch_fullstate, batch_rollout = batch
 
             if self.use_rollout:
                 num_rollout_sampled += np.sum(batch_rollout)
+                if r_batch_size > 0:
+                    num_rollout_sampled += np.sum(r_batch_rollout)
 
             feed_dict = {
                 self.local_net.s: batch_state,
@@ -196,17 +213,41 @@ class SILTrainingThread(CommonWorker):
                 self.sil_apply_gradients_local,
                 ]
             adv_clip, adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
-            sil_memory.set_weights(index_list, adv_clip)
             # logger.info("adv_clip: {}".format(adv_clip))
             # logger.info("adv_raw: {}".format(adv))
+            sil_memory.set_weights(index_list, adv_clip)
+            pos_idx = [i for (i, num) in enumerate(adv) if num > 0]
+            neg_idx = [i for (i, num) in enumerate(adv) if num <= 0]
+            total_used += len(pos_idx)
+            if self.use_sil_neg:
+                total_used += len(neg_idx)
+
+            if r_batch_size > 0:
+                feed_dict = {
+                    self.local_net.s: r_batch_state,
+                    self.local_net.a_sil: r_batch_action,
+                    self.local_net.returns: r_batch_returns,
+                    self.local_net.weights: r_weights,
+                    self.learning_rate_input: cur_learning_rate,
+                    }
+                fetch = [
+                    self.local_net.clipped_advs,
+                    self.local_net.advs,
+                    self.sil_apply_gradients,
+                    self.sil_apply_gradients_local,
+                    ]
+                r_adv_clip, r_adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
+                rollout_buffer.set_weights(r_index_list, r_adv_clip)
 
             if self.use_rollout or self.train_classifier:
-                pos_idx = [i for (i, num) in enumerate(adv) if num > 0]
-                neg_idx = [i for (i, num) in enumerate(adv) if num <= 0]
-                total_used += len(pos_idx)
                 num_rollout_used += np.sum(np.take(batch_rollout, pos_idx))
+                if r_batch_size > 0:
+                    r_pos_idx = [i for (i, num) in enumerate(r_adv) if num > 0]
+                    r_neg_idx = [i for (i, num) in enumerate(r_adv) if num <= 0]
+                    total_used += len(r_pos_idx)
+                    num_rollout_used += np.sum(np.take(r_batch_rollout, r_pos_idx))
 
-            # find the index of samples
+            # find the index of good samples
             if self.train_classifier:
                 for max_adv_idx in pos_idx:
                     goodstate_queue.put(
@@ -216,7 +257,16 @@ class SILTrainingThread(CommonWorker):
                          deepcopy([ batch_returns[max_adv_idx] ]),
                          deepcopy([ batch_rollout[max_adv_idx] ]))
                         )
-            if self.use_rollout:
+                    if r_batch_size > 0:
+                        for max_adv_idx in r_pos_idx:
+                            goodstate_queue.put(
+                                (deepcopy([ r_batch_state[max_adv_idx] ]),
+                                 deepcopy([ r_batch_fullstate[max_adv_idx] ]),
+                                 deepcopy([ np.argmax(r_batch_action[max_adv_idx ]) ]),
+                                 deepcopy([ r_batch_returns[max_adv_idx] ]),
+                                 deepcopy([ r_batch_rollout[max_adv_idx] ]))
+                                )
+            if self.use_rollout and not stop_rollout:
                 for (i, min_adv_idx) in enumerate(neg_idx):
                     badstate_queue.put(
                          (  adv[min_adv_idx], #first sort by adv
@@ -228,6 +278,18 @@ class SILTrainingThread(CommonWorker):
                              deepcopy(batch_rollout[min_adv_idx]))
                          )
                         )
+                    if r_batch_size > 0:
+                        for (i, min_adv_idx) in enumerate(r_neg_idx):
+                            badstate_queue.put(
+                                 (  r_adv[min_adv_idx], #first sort by adv
+                                    -(int(datetime.now().second + datetime.now().microsecond)),  #if adv same, sort by newest first
+                                    (deepcopy(r_batch_state[min_adv_idx]),
+                                     deepcopy(r_batch_fullstate[min_adv_idx]),
+                                     deepcopy(np.argmax(r_batch_action[min_adv_idx])),
+                                     deepcopy(r_batch_returns[min_adv_idx]),
+                                     deepcopy(r_batch_rollout[min_adv_idx]))
+                                 )
+                                )
 
             sil_ctr += 1
 

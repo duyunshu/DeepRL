@@ -410,6 +410,9 @@ class CommonWorker(object):
             score=total_reward, steps=total_steps,
             episodes=n_episodes, global_t=global_t, mode='Classifier_Test')
 
+        return (total_reward, total_steps, n_episodes)
+
+
     def test_fixed_classifier(self, global_t, max_steps, sess, worker=None, model=None):
         """Evaluate game with current classifier model."""
         assert model is not None
@@ -480,3 +483,5 @@ class CommonWorker(object):
         self.record_summary(
             score=total_reward, steps=total_steps,
             episodes=n_episodes, global_t=global_t, mode='Classifier_Test')
+
+        return (total_reward, total_steps, n_episodes)

@@ -110,7 +110,8 @@ def run_a3c(args):
     pretrain_graph = None
     if args.load_pretrained_model:
         pretrain_graph, global_pretrained_model = setup_pretrained_model(tf,
-            args, action_size, input_shape)
+            args, action_size, input_shape,
+            device="/gpu:0" if args.use_gpu else device)
         assert global_pretrained_model is not None
         assert pretrain_graph is not None
         if args.train_classifier:
@@ -127,6 +128,7 @@ def run_a3c(args):
     # setup experience memory
     shared_memory = None
     exp_buffer = None
+    rollout_buffer = None
     if args.use_sil:
         shared_memory = SILReplayMemory(
             action_size, max_len=args.memory_length, gamma=args.gamma,
@@ -134,6 +136,14 @@ def run_a3c(args):
             height=input_shape[0], width=input_shape[1],
             phi_length=input_shape[2], priority=args.priority_memory,
             reward_constant=args.reward_constant)
+
+        if args.use_rollout:
+            rollout_buffer = SILReplayMemory(
+                action_size, max_len=args.memory_length, gamma=args.gamma,
+                clip=False if args.unclipped_reward else True,
+                height=input_shape[0], width=input_shape[1],
+                phi_length=input_shape[2], priority=args.priority_memory,
+                reward_constant=args.reward_constant)
 
         if args.train_classifier:
             exp_buffer = SILReplayMemory(
@@ -150,8 +160,15 @@ def run_a3c(args):
                 height=input_shape[0], width=input_shape[1],
                 phi_length=input_shape[2], priority=False,
                 reward_constant=args.reward_constant)
+            # if args.use_rollout:
+            #     temp_memory2 = SILReplayMemory(
+            #         action_size, max_len=args.memory_length, gamma=args.gamma,
+            #         clip=False if args.unclipped_reward else True,
+            #         height=input_shape[0], width=input_shape[1],
+            #         phi_length=input_shape[2], priority=False,
+            #         reward_constant=args.reward_constant)
             if args.train_classifier:
-                temp_memory2 = SILReplayMemory(
+                temp_memory3 = SILReplayMemory(
                     action_size, max_len=args.memory_length, gamma=args.gamma,
                     clip=False if args.unclipped_reward else True,
                     height=input_shape[0], width=input_shape[1],
@@ -163,35 +180,48 @@ def run_a3c(args):
                 for i in range(len(demo)+1):
                     s0, a0, _, fs0, _, r1, t1, _ = demo[i]
                     temp_memory.add_item(s0, fs0, a0, r1, t1)
+                    # if args.use_rollout:
+                    #     temp_memory2.add_item(s0, fs0, a0, r1, t1)
                     if args.train_classifier:
-                        temp_memory2.add_item(s0, fs0, a0, r1, t1)
+                        temp_memory3.add_item(s0, fs0, a0, r1, t1)
 
                     if t1:  # terminal
                         shared_memory.fs_size = len(fs0)
                         shared_memory.extend(temp_memory)
+                        if args.use_rollout:
+                            rollout_buffer.fs_size = len(fs0)
+                        #     rollout_buffer.extend(temp_memory2)
                         if args.train_classifier:
                             exp_buffer.fs_size = len(fs0)
-                            exp_buffer.extend(temp_memory2)
+                            exp_buffer.extend(temp_memory3)
 
                 if len(temp_memory) > 0:
                     logger.warning("Disregard {} states in"
                                    " demo_memory {}".format(
                                     len(temp_memory), idx))
                     temp_memory.reset()
+                # if args.use_rollout:
+                #     if len(temp_memory2) > 0:
+                #         logger.warning("Disregard {} states in"
+                #                        " demo_memory {}".format(
+                #                         len(temp_memory2), idx))
+                #         temp_memory2.reset()
                 if args.train_classifier:
-                    if len(temp_memory2) > 0:
+                    if len(temp_memory3) > 0:
                         logger.warning("Disregard {} states in"
                                        " demo_memory {}".format(
-                                        len(temp_memory2), idx))
-                        temp_memory2.reset()
+                                        len(temp_memory3), idx))
+                        temp_memory3.reset()
 
             # log memory information
             shared_memory.log()
             del temp_memory
-
+            if args.use_rollout:
+                rollout_buffer.log()
+                # del temp_memory2
             if args.train_classifier:
                 exp_buffer.log()
-                del temp_memory2
+                del temp_memory3
 
     ############## Setup Thread Workers BEGIN ################
     # one sil thread, one classifier thread, one rollout thread, others are a3c
@@ -214,16 +244,17 @@ def run_a3c(args):
     sil_worker = None
     if args.use_sil:
         sil_network = GameACFFNetwork(
-            action_size, startIndex, device="/cpu:0",
+            action_size, startIndex, device="/gpu:0" if args.use_gpu else device,
             padding=args.padding, in_shape=input_shape)
 
         sil_worker = SILTrainingThread(startIndex, global_network, sil_network,
             args.initial_learn_rate,
             learning_rate_input,
-            grad_applier, device="/cpu:0",
+            grad_applier, device="/gpu:0" if args.use_gpu else device,
             batch_size=args.batch_size,
             use_rollout=args.use_rollout,
-            train_classifier=args.train_classifier)
+            train_classifier=args.train_classifier,
+            use_sil_neg=args.use_sil_neg)
 
         all_workers.append(sil_worker)
         startIndex += 1
@@ -232,7 +263,7 @@ def run_a3c(args):
     rollout_worker = None
     if args.use_rollout:
         rollout_network = GameACFFNetwork(
-            action_size, startIndex, device="/cpu:0",
+            action_size, startIndex, device=device,
             padding=args.padding, in_shape=input_shape)
 
         rollout_local_pretrained_model = PretrainedModelNetwork(
@@ -243,7 +274,8 @@ def run_a3c(args):
             use_denoising=args.class_use_denoising,
             noise_factor=args.class_noise_factor,
             loss_function=args.class_loss_function,
-            use_slv=args.class_use_slv)
+            use_slv=args.class_use_slv,
+            device="/gpu:0" if args.use_gpu else device)
 
         rollout_worker = RolloutThread(
             thread_index=startIndex, action_size=action_size, env_id=args.gym_env,
@@ -448,11 +480,18 @@ def run_a3c(args):
     last_temp_global_t = global_t
     # ispretrain_markers = [False] * args.parallel_size
 
+    _rollout_proportion = args.rollout_proportion
+    _stop_rollout = False
+    last_reward = -(sys.maxsize)
+    class_last_reward = -(sys.maxsize)
+
     def train_function(parallel_idx, th_ctr, ep_queue, net_updates,
                        class_updates, goodstate_queue, badstate_queue):
         nonlocal global_t, step_t, rewards, class_rewards, lock, next_global_t, \
             next_save_t, last_temp_global_t, \
-            shared_memory, exp_buffer
+            shared_memory, exp_buffer, rollout_buffer, \
+            _rollout_proportion, _stop_rollout, \
+            last_reward, class_last_reward
             # ispretrain_markers, \
 
         parallel_worker = all_workers[parallel_idx]
@@ -464,22 +503,27 @@ def run_a3c(args):
                 rewards['eval'][step_t] = parallel_worker.testing(
                     sess, args.eval_max_steps, global_t, folder,
                     demo_memory_cam=demo_memory_cam, worker=all_workers[-1])
+                last_reward = rewards['eval'][step_t][0]
                 # testing classifier in game (retrain classifier)
                 if args.train_classifier:
                     assert classifier_index is not None
-                    parallel_worker.test_retrain_classifier(global_t=global_t,
+                    class_rewards['class_eval'][step_t] = \
+                        parallel_worker.test_retrain_classifier(global_t=global_t,
                                                     max_steps=args.eval_max_steps,
                                                     sess=pretrain_sess,
                                                     worker=all_workers[classifier_index])
+                    class_last_reward = class_rewards['class_eval'][step_t][0]
                 # testing classifier in game (fix classifier)
                 elif args.load_pretrained_model:
                     assert pretrain_sess is not None
                     assert global_pretrained_model is not None
-                    parallel_worker.test_fixed_classifier(global_t=global_t,
+                    class_rewards['class_eval'][step_t] = \
+                        parallel_worker.test_fixed_classifier(global_t=global_t,
                                                     max_steps=args.eval_max_steps,
                                                     sess=pretrain_sess,
                                                     worker=all_workers[-1],
                                                     model=global_pretrained_model)
+                    class_last_reward = class_rewards['class_eval'][step_t][0]
 
                 checkpt_file = folder / 'model_checkpoints'
                 checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
@@ -502,6 +546,7 @@ def run_a3c(args):
 
         elif parallel_worker.is_rollout_thread:
             rollout_ctr = 0
+            added_rollout_ctr = 0
 
         elif parallel_worker.is_classify_thread:
             # TODO(add as command-line parameters later)
@@ -524,20 +569,36 @@ def run_a3c(args):
                 elif parallel_worker.is_classify_thread:
                     logger.info("Classification: # of updates: {}".format(classify_ctr))
                 elif parallel_worker.is_rollout_thread:
-                    logger.info("Rollout: # of corrections: {}".format(rollout_ctr))
+                    logger.info("Rollout: # total: {}".format(rollout_ctr))
+                    logger.info("Rollout: # of corrections: {}".format(added_rollout_ctr))
                 return
 
             if parallel_worker.is_sil_thread:
-                if net_updates.qsize() >= sil_interval \
-                   and len(shared_memory) >= min_mem:
-                    sil_train_flag = True
+                if args.use_sil_skip:
+                    if net_updates.qsize() >= sil_interval \
+                       and len(shared_memory) >= min_mem \
+                       and global_t % 2 == 0:
+                        sil_train_flag = True
+                else:
+                    if net_updates.qsize() >= sil_interval \
+                       and len(shared_memory) >= min_mem:
+                        sil_train_flag = True
 
                 if sil_train_flag:
+                    # print(global_t)
                     sil_train_flag = False
                     th_ctr.get()
 
+                    if args.stop_rollout and class_last_reward <= last_reward:
+                        _rollout_proportion = 0
+                        _stop_rollout = True
+                        # logger.info("SIL: stop sampling from rollout")
+
                     train_out = parallel_worker.sil_train(
-                        sess, global_t, shared_memory, sil_ctr, m=m_repeat)
+                        sess, global_t, shared_memory, sil_ctr, m_repeat,
+                        rollout_buffer=rollout_buffer,
+                        rollout_proportion=_rollout_proportion,
+                        stop_rollout=_stop_rollout)
                     sil_ctr, total_used, num_rollout_sampled, num_rollout_used, \
                         goodstate, badstate = train_out
 
@@ -554,7 +615,7 @@ def run_a3c(args):
                     if args.use_rollout:
                         while not badstate.empty():
                             if badstate_queue.full():
-                                # we are removing the ones with smallest adv
+                                #TODO we are removing the ones with smallest adv
                                 # should we remove the largest adv first?
                                 # that will be a reversed priority queue
                                 # but for now as it is
@@ -574,8 +635,10 @@ def run_a3c(args):
                                               goods=goodstate_queue.qsize(),
                                               bads=badstate_queue.qsize(),
                                               global_t=global_t)
+
                         if sil_ctr % 100 == 0:
                             log_data = (sil_ctr, len(shared_memory),
+                                        len(rollout_buffer),
                                         total_used, args.batch_size*m_repeat,
                                         num_rollout_sampled,
                                         num_rollout_used,
@@ -583,17 +646,25 @@ def run_a3c(args):
                                         badstate_queue.qsize())
                             logger.info("SIL: sil_ctr={0:}"
                                         " sil_memory_size={1:}"
-                                        " total_sample_used={2:}/{3:}"
-                                        " rollout_sampled={4:}"
-                                        " rollout_used={5:}"
-                                        " #good_states={6:}"
-                                        " #bad_states={7:}".format(*log_data))
+                                        " rollout_buffer_size={2:}"
+                                        " total_sample_used={3:}/{4:}"
+                                        " rollout_sampled={5:}"
+                                        " rollout_used={6:}"
+                                        " #good_states={7:}"
+                                        " #bad_states={8:}".format(*log_data))
                     else:
-                        parallel_worker.record_sil(sil_ctr=sil_ctr, global_t=global_t)
+                        parallel_worker.record_sil(sil_ctr=sil_ctr,
+                                                   total_used=total_used,
+                                                   rollout_sampled=num_rollout_sampled,
+                                                   rollout_used=num_rollout_used,
+                                                   global_t=global_t)
                         if sil_ctr % 100 == 0:
-                            log_data = (sil_ctr, len(shared_memory))
-                            logger.info("SIL: sil_ctr={}"
-                                        " sil_memory_size={}".format(*log_data))
+                            log_data = (sil_ctr, total_used,
+                                        args.batch_size*m_repeat,
+                                        len(shared_memory))
+                            logger.info("SIL: sil_ctr={0:}"
+                                        " total_sample_used={1:}/{2:}"
+                                        " sil_memory_size={3:}".format(*log_data))
 
                 # Adding episodes to SIL memory is centralize to ensure
                 # sampling and updating of priorities does not become a problem
@@ -623,20 +694,27 @@ def run_a3c(args):
                 th_ctr.get()
                 diff_global_t = 0
 
-                if global_t < args.advice_budget:
+                if global_t < args.advice_budget and _rollout_proportion > 0:
                     _, _, sample = badstate_queue.get()
 
                     train_out = parallel_worker.rollout(sess, pretrain_sess,
-                                                   global_t, sample, rollout_ctr)
+                                                   global_t, sample, rollout_ctr,
+                                                   args.add_all_rollout)
                     diff_global_t, episode_end, \
                         part_end, rollout_ctr, add = train_out
 
                     # should always part_end,
                     # and only add if new return is better
                     if part_end and add:
-                        ep_queue.put(parallel_worker.episode.get_data())
+                        # if rollout_buffer:
+                            # data = parallel_worker.episode.get_data()
+                            # parallel_worker.episode.set_data(*data)
+                        rollout_buffer.extend(parallel_worker.episode)
+                        # else:
+                        #     ep_queue.put(parallel_worker.episode.get_data())
 
                     parallel_worker.episode.reset()
+
 
                 th_ctr.put(1)
 
@@ -712,23 +790,33 @@ def run_a3c(args):
                         sess, args.eval_max_steps, step_t, folder,
                         demo_memory_cam=demo_memory_cam, worker=all_workers[-1])
                     save_best_model(rewards['eval'][step_t][0])
+                    last_reward = rewards['eval'][step_t][0]
 
                     # testing classifier in game (retrain classifier)
                     if args.train_classifier:
                         assert classifier_index is not None
-                        parallel_worker.test_retrain_classifier(global_t=step_t,
+                        class_rewards['class_eval'][step_t] = \
+                            parallel_worker.test_retrain_classifier(global_t=step_t,
                                                         max_steps=args.eval_max_steps,
                                                         sess=pretrain_sess,
                                                         worker=all_workers[classifier_index])
+                        class_last_reward = class_rewards['class_eval'][step_t][0]
                     # testing classifier in game (fix classifier)
                     elif args.load_pretrained_model:
                         assert pretrain_sess is not None
                         assert global_pretrained_model is not None
-                        parallel_worker.test_fixed_classifier(global_t=step_t,
+                        class_rewards['class_eval'][step_t] = \
+                            parallel_worker.test_fixed_classifier(global_t=step_t,
                                                         max_steps=args.eval_max_steps,
                                                         sess=pretrain_sess,
                                                         worker=all_workers[-1],
                                                         model=global_pretrained_model)
+                        class_last_reward = class_rewards['class_eval'][step_t][0]
+
+                    # dump pickle
+                    reward_fname = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)
+                    pickle.dump(rewards, reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+                    logger.info('Dump pickle at step {}'.format(global_t))
 
             if global_t > next_save_t:
                 freq = (args.max_time_step * args.max_time_step_fraction)

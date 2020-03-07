@@ -127,7 +127,7 @@ class RolloutThread(CommonWorker):
                     returns[i] = transform_h(rewards[i] + exp_r_t)
         return returns[0]
 
-    def rollout(self, a3c_sess, pretrain_sess, global_t, badstate, rollout_ctr):
+    def rollout(self, a3c_sess, pretrain_sess, global_t, badstate, rollout_ctr, add_all_rollout):
         """Rollout, one at a time."""
         # a3c_sess.run(self.sync_a3c)
         pretrain_sess.run(self.sync_pretrained)
@@ -194,7 +194,7 @@ class RolloutThread(CommonWorker):
                 name = 'EpisodicLifeEnv'
                 terminal_end = get_wrapper_by_name(env, name).was_real_done
                 if rollout_ctr % 10 == 0 and rollout_ctr > 0:
-                    log_msg = "rollout: rollout_ctr={} worker={} global_t={} local_t={}".format(
+                    log_msg = "ROLLOUT: rollout_ctr={} worker={} global_t={} local_t={}".format(
                         rollout_ctr, self.thread_idx, global_t, self.local_t)
                     score_str = colored("score={}".format(
                         self.episode_reward), "magenta")
@@ -206,7 +206,16 @@ class RolloutThread(CommonWorker):
                     logger.info(log_msg)
 
                 new_return = self.compute_return_for_state(rewards, terminals)
-                if new_return > old_return:
+                if not add_all_rollout:
+                    if new_return > old_return:
+                        add = True
+                        self.record_rollout(
+                            score=self.episode_reward, steps=self.episode_steps,
+                            old_return=old_return, new_return=new_return,
+                            global_t=global_t, rollout_ctr=rollout_ctr, mode='Rollout',
+                            confidence=np.mean(confidences), episodes=None)
+                        rollout_ctr += 1
+                else:
                     add = True
                     self.record_rollout(
                         score=self.episode_reward, steps=self.episode_steps,

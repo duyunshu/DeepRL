@@ -45,7 +45,9 @@ def setup_folder(args, env_name):
             if args.priority_memory:
                 end_str += '_prioritymem'
             if args.use_sil_neg:
-                end_str+= '_usenegsample'
+                end_str += '_usenegsample'
+            if args.use_sil_skip:
+                end_str +='_useskip'
 
         if args.load_pretrained_model:
             end_str+='_loadmodel'
@@ -56,6 +58,8 @@ def setup_folder(args, env_name):
 
         if args.use_rollout:
             end_str+='_rollout'
+            if args.add_all_rollout:
+                end_str+='_addallrollout'
 
         folder += end_str
 

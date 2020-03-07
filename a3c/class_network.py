@@ -28,11 +28,11 @@ class Network(ABC):
         """Initialize Network base class."""
         self.action_size = action_size
         self._thread_index = thread_index
-        self._device = None
-        if device=="/cpu:0":
-            self._device = device
-            import os
-            os.environ["CUDA_VISIBLE_DEVICES"]="-1"
+        self._device = device
+        # if device=="/cpu:0":
+        #     self._device = device
+        #     import os
+        #     os.environ["CUDA_VISIBLE_DEVICES"]="-1"
 
 
     @abstractmethod
@@ -212,7 +212,7 @@ class MultiClassNetwork(Network):
         Network.__init__(self, action_size, thread_index, device)
         self.graph = pretrain_graph
         logger.info("network: MultiClassNetwork")
-        logger.info("device: {}".format("cpu" if device is not None else "gpu"))
+        logger.info("device: {}".format(self._device))
         logger.info("action_size: {}".format(self.action_size))
         logger.info("use_mnih_2015: {}".format(
             colored(self.use_mnih_2015,
@@ -235,7 +235,7 @@ class MultiClassNetwork(Network):
             self.s = tf.placeholder(tf.float32, [None] + list(self.in_shape))
             self.s_n = tf.div(self.s, 255.)
 
-            with tf.variable_scope(scope_name):
+            with tf.device(self._device), tf.variable_scope(scope_name):
                 if self.use_mnih_2015:
                     self.W_conv1, self.b_conv1 = self.conv_variable(
                         [8, 8, 4, 32], layer_name='conv1', gain=np.sqrt(2))
@@ -315,7 +315,7 @@ class MultiClassNetwork(Network):
     def prepare_loss(self, sl_loss_weight=1.0, val_weight=0.01, min_batch_size=4):
         """Prepare tf operations training loss."""
         with self.graph.as_default():
-            with tf.name_scope("class-Loss"):
+            with tf.device(self._device), tf.name_scope("class-Loss"):
                 # taken action (input for policy)
                 self.a = tf.placeholder(tf.float32,
                                         shape=[None, self.action_size])
@@ -406,7 +406,7 @@ class MultiClassNetwork(Network):
 
     def prepare_evaluate(self):
         """Prepare tf operations for evaluation."""
-        with self.graph.as_default():
+        with tf.device(self._device), self.graph.as_default():
             correct_prediction = tf.equal(
                 tf.argmax(self.logits, 1), tf.argmax(self.a, 1))
             self.accuracy = tf.reduce_mean(

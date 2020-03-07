@@ -104,6 +104,8 @@ class SILReplayMemory(object):
     def extend(self, x):
         """Use only in SIL memory."""
         assert x.terminal[-1]  # assert that last state is a terminal state
+        if self.fs_size == 0:
+            self.fs_size = len(x.fullstates[0])
 
         x_returns = self.__class__.compute_returns(
             x.rewards, x.terminal, self.gamma, self.clip, self.reward_constant)
@@ -129,6 +131,7 @@ class SILReplayMemory(object):
                 assert len(self) == self.maxlen
 
             assert len(self) == len(self.returns) <= self.maxlen
+
 
         x.reset()
         assert len(x) == 0
