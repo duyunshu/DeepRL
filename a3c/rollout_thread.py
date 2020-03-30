@@ -5,6 +5,8 @@ import numpy as np
 import tensorflow as tf
 import time
 import matplotlib.pyplot as plt
+import math
+import matplotlib.pyplot as plt
 
 from common.game_state import GameState
 from common.game_state import get_wrapper_by_name
@@ -82,7 +84,7 @@ class RolloutThread(CommonWorker):
 
     def record_rollout(self, score=0, steps=0,
                        old_return=0, new_return=0,
-                       global_t=0, rollout_ctr=0,
+                       global_t=0, rollout_ctr=0, added_rollout_ctr=0,
                        mode='Rollout', confidence=None, episodes=None):
         """Record rollout summary."""
         summary = tf.Summary()
@@ -94,8 +96,10 @@ class RolloutThread(CommonWorker):
                           simple_value=float(new_return))
         summary.value.add(tag='{}/steps'.format(mode),
                           simple_value=float(steps))
-        summary.value.add(tag='{}/rollout_ctr'.format(mode),
+        summary.value.add(tag='{}/all_rollout_ctr'.format(mode),
                           simple_value=float(rollout_ctr))
+        summary.value.add(tag='{}/added_rollout_ctr'.format(mode),
+                          simple_value=float(added_rollout_ctr))
         if confidence is not None:
             summary.value.add(tag='{}/advice-confidence'.format(mode),
                               simple_value=float(confidence))
@@ -127,7 +131,8 @@ class RolloutThread(CommonWorker):
                     returns[i] = transform_h(rewards[i] + exp_r_t)
         return returns[0]
 
-    def rollout(self, a3c_sess, pretrain_sess, global_t, badstate, rollout_ctr, add_all_rollout):
+    def rollout(self, a3c_sess, pretrain_sess, global_t, badstate, rollout_ctr,
+                added_rollout_ctr, add_all_rollout, rollout_dict, ep_max_steps):
         """Rollout, one at a time."""
         # a3c_sess.run(self.sync_a3c)
         pretrain_sess.run(self.sync_pretrained)
@@ -149,11 +154,18 @@ class RolloutThread(CommonWorker):
         self.rolloutgame.reset(hard_reset=True)
         self.rolloutgame.restore_full_state(fs)
         # check if restore successful
-        assert self.rolloutgame.s_t.all() == fs.all()
+        # assert self.rolloutgame.s_t.all() == fs.all()
+        fs_check = self.rolloutgame.clone_full_state()
+        assert fs_check.all() == fs.all()
+        del fs_check
 
         start_local_t = self.local_t
 
-        while True:
+        # prevent breakout from stucking,
+        # see https://github.com/openai/gym/blob/54f22cf4db2e43063093a1b15d968a57a32b6e90/gym/envs/__init__.py#L635
+        while ep_max_steps > 0: #True:
+            # self.rolloutgame.env.render()
+            # time.sleep(.1)
             state = cv2.resize(self.rolloutgame.s_t,
                        self.local_a3c.in_shape[:-1],
                        interpolation=cv2.INTER_AREA)
@@ -166,6 +178,8 @@ class RolloutThread(CommonWorker):
             confidences.append(confidence)
 
             self.rolloutgame.step(action)
+
+            ep_max_steps-=1
 
             reward = self.rolloutgame.reward
             terminal = self.rolloutgame.terminal
@@ -192,10 +206,11 @@ class RolloutThread(CommonWorker):
                 terminal_pseudo = True
                 env = self.rolloutgame.env
                 name = 'EpisodicLifeEnv'
+                rollout_ctr += 1
                 terminal_end = get_wrapper_by_name(env, name).was_real_done
                 if rollout_ctr % 10 == 0 and rollout_ctr > 0:
-                    log_msg = "ROLLOUT: rollout_ctr={} worker={} global_t={} local_t={}".format(
-                        rollout_ctr, self.thread_idx, global_t, self.local_t)
+                    log_msg = "ROLLOUT: rollout_ctr={} added_rollout_ct={} worker={} global_t={} local_t={}".format(
+                        rollout_ctr, added_rollout_ctr, self.thread_idx, global_t, self.local_t)
                     score_str = colored("score={}".format(
                         self.episode_reward), "magenta")
                     steps_str = colored("steps={}".format(
@@ -209,20 +224,23 @@ class RolloutThread(CommonWorker):
                 if not add_all_rollout:
                     if new_return > old_return:
                         add = True
-                        self.record_rollout(
-                            score=self.episode_reward, steps=self.episode_steps,
-                            old_return=old_return, new_return=new_return,
-                            global_t=global_t, rollout_ctr=rollout_ctr, mode='Rollout',
-                            confidence=np.mean(confidences), episodes=None)
-                        rollout_ctr += 1
+                        added_rollout_ctr += 1
+                        round_t = int(math.floor(global_t/10))*10
+                        rollout_dict["added_ctr"][round_t] = added_rollout_ctr
+                        rollout_dict["total_ctr"][round_t] = rollout_ctr
+                        rollout_dict["new_return"][round_t] = new_return
+                        rollout_dict["old_return"][round_t] = old_return
                 else:
                     add = True
-                    self.record_rollout(
-                        score=self.episode_reward, steps=self.episode_steps,
-                        old_return=old_return, new_return=new_return,
-                        global_t=global_t, rollout_ctr=rollout_ctr, mode='Rollout',
-                        confidence=np.mean(confidences), episodes=None)
-                    rollout_ctr += 1
+
+                self.record_rollout(
+                    score=self.episode_reward, steps=self.episode_steps,
+                    old_return=old_return, new_return=new_return,
+                    global_t=global_t, rollout_ctr=rollout_ctr,
+                    added_rollout_ctr=added_rollout_ctr,
+                    mode='Rollout',
+                    confidence=np.mean(confidences), episodes=None)
+
 
                 self.episode_reward = 0
                 self.episode_steps = 0
@@ -231,4 +249,5 @@ class RolloutThread(CommonWorker):
                 break
 
         diff_local_t = self.local_t - start_local_t
-        return diff_local_t, terminal_end, terminal_pseudo, rollout_ctr, add
+        return diff_local_t, terminal_end, terminal_pseudo, rollout_ctr, \
+               added_rollout_ctr, add, rollout_dict

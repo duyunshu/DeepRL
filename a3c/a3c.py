@@ -23,6 +23,8 @@ import signal
 import sys
 import threading
 import time
+import pandas as pd
+import math
 
 from threading import Event, Thread
 from common_worker import CommonWorker
@@ -86,6 +88,9 @@ def run_a3c(args):
 
     class_best_model_reward = -(sys.maxsize)
     class_rewards = {'class_eval': {}}
+
+    sil_dict = {"a3c_used":{}, "rollout_used":{}}
+    rollout_dict = {"added_ctr":{},"total_ctr":{}, "new_return":{}, "old_return":{}}
 
     stop_req = False
 
@@ -491,7 +496,8 @@ def run_a3c(args):
             next_save_t, last_temp_global_t, \
             shared_memory, exp_buffer, rollout_buffer, \
             _rollout_proportion, _stop_rollout, \
-            last_reward, class_last_reward
+            last_reward, class_last_reward,\
+            sil_dict, rollout_dict
             # ispretrain_markers, \
 
         parallel_worker = all_workers[parallel_idx]
@@ -543,10 +549,14 @@ def run_a3c(args):
             m_repeat = 4
             min_mem = args.batch_size * m_repeat
             sil_train_flag = args.load_memory and len(shared_memory) >= min_mem
+            num_a3c_used_list = []
+            num_rollout_used_list = []
+
 
         elif parallel_worker.is_rollout_thread:
             rollout_ctr = 0
             added_rollout_ctr = 0
+            # added_rollout_list = []
 
         elif parallel_worker.is_classify_thread:
             # TODO(add as command-line parameters later)
@@ -564,13 +574,22 @@ def run_a3c(args):
                 return
 
             if global_t >= (args.max_time_step * args.max_time_step_fraction):
+                file = folder / "Worker_info.txt"
+                f = open(str(file), 'a+')
                 if parallel_worker.is_sil_thread:
-                    logger.info("SIL: # of updates: {}".format(sil_ctr))
+                    message = "SIL: # of updates: {}\n".format(sil_ctr)
+                    logger.info(message)
+                    f.write(message)
                 elif parallel_worker.is_classify_thread:
-                    logger.info("Classification: # of updates: {}".format(classify_ctr))
+                    message = "Classification: # of updates: {}\n".format(classify_ctr)
+                    logger.info(message)
+                    f.write(message)
                 elif parallel_worker.is_rollout_thread:
-                    logger.info("Rollout: # total: {}".format(rollout_ctr))
-                    logger.info("Rollout: # of corrections: {}".format(added_rollout_ctr))
+                    message = "Rollout: total={}, ".format(rollout_ctr)+ \
+                              "successful={}\n".format(added_rollout_ctr)
+                    logger.info(message)
+                    f.write(message)
+                f.close()
                 return
 
             if parallel_worker.is_sil_thread:
@@ -599,8 +618,17 @@ def run_a3c(args):
                         rollout_buffer=rollout_buffer,
                         rollout_proportion=_rollout_proportion,
                         stop_rollout=_stop_rollout)
-                    sil_ctr, total_used, num_rollout_sampled, num_rollout_used, \
+                    sil_ctr, total_used, num_a3c_used, \
+                        num_rollout_sampled, num_rollout_used, \
                         goodstate, badstate = train_out
+
+                    num_a3c_used_list.append(num_a3c_used)
+                    num_rollout_used_list.append(num_rollout_used)
+                    round_t = int(math.floor(global_t/10))*10
+                    sil_dict["a3c_used"][round_t] = \
+                        pd.Series(num_a3c_used_list).ewm(alpha=0.001).mean().values[-1]
+                    sil_dict["rollout_used"][round_t] = \
+                        pd.Series(num_rollout_used_list).ewm(alpha=0.001).mean().values[-1]
 
                     th_ctr.put(1)
 
@@ -630,6 +658,7 @@ def run_a3c(args):
                     if args.use_rollout or args.train_classifier:
                         parallel_worker.record_sil(sil_ctr=sil_ctr,
                                               total_used=total_used,
+                                              num_a3c_used=num_a3c_used,
                                               rollout_sampled=num_rollout_sampled,
                                               rollout_used=num_rollout_used,
                                               goods=goodstate_queue.qsize(),
@@ -640,6 +669,7 @@ def run_a3c(args):
                             log_data = (sil_ctr, len(shared_memory),
                                         len(rollout_buffer),
                                         total_used, args.batch_size*m_repeat,
+                                        num_a3c_used,
                                         num_rollout_sampled,
                                         num_rollout_used,
                                         goodstate_queue.qsize(),
@@ -648,23 +678,27 @@ def run_a3c(args):
                                         " sil_memory_size={1:}"
                                         " rollout_buffer_size={2:}"
                                         " total_sample_used={3:}/{4:}"
-                                        " rollout_sampled={5:}"
-                                        " rollout_used={6:}"
-                                        " #good_states={7:}"
-                                        " #bad_states={8:}".format(*log_data))
+                                        " a3c_used={5:}"
+                                        " rollout_sampled={6:}"
+                                        " rollout_used={7:}"
+                                        " #good_states={8:}"
+                                        " #bad_states={9:}".format(*log_data))
                     else:
                         parallel_worker.record_sil(sil_ctr=sil_ctr,
                                                    total_used=total_used,
+                                                   num_a3c_used=num_a3c_used,
                                                    rollout_sampled=num_rollout_sampled,
                                                    rollout_used=num_rollout_used,
                                                    global_t=global_t)
                         if sil_ctr % 100 == 0:
                             log_data = (sil_ctr, total_used,
                                         args.batch_size*m_repeat,
+                                        num_a3c_used,
                                         len(shared_memory))
                             logger.info("SIL: sil_ctr={0:}"
                                         " total_sample_used={1:}/{2:}"
-                                        " sil_memory_size={3:}".format(*log_data))
+                                        " a3c_used={3:}"
+                                        " sil_memory_size={4:}".format(*log_data))
 
                 # Adding episodes to SIL memory is centralize to ensure
                 # sampling and updating of priorities does not become a problem
@@ -699,22 +733,21 @@ def run_a3c(args):
 
                     train_out = parallel_worker.rollout(sess, pretrain_sess,
                                                    global_t, sample, rollout_ctr,
-                                                   args.add_all_rollout)
+                                                   added_rollout_ctr,
+                                                   args.add_all_rollout,
+                                                   rollout_dict,
+                                                   args.max_ep_step)
                     diff_global_t, episode_end, \
-                        part_end, rollout_ctr, add = train_out
+                        part_end, rollout_ctr, added_rollout_ctr, add, \
+                        rollout_dict = train_out
 
                     # should always part_end,
                     # and only add if new return is better
                     if part_end and add:
-                        # if rollout_buffer:
-                            # data = parallel_worker.episode.get_data()
-                            # parallel_worker.episode.set_data(*data)
                         rollout_buffer.extend(parallel_worker.episode)
-                        # else:
-                        #     ep_queue.put(parallel_worker.episode.get_data())
+
 
                     parallel_worker.episode.reset()
-
 
                 th_ctr.put(1)
 
@@ -816,6 +849,16 @@ def run_a3c(args):
                     # dump pickle
                     reward_fname = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)
                     pickle.dump(rewards, reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+
+                    class_reward_fname = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
+                    pickle.dump(class_rewards, class_reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+
+                    sil_fname = folder / '{}-a3c-sil.pkl'.format(GYM_ENV_NAME)
+                    pickle.dump(sil_dict, sil_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+
+                    rollout_fname = folder / '{}-a3c-rollout.pkl'.format(GYM_ENV_NAME)
+                    pickle.dump(rollout_dict, rollout_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+
                     logger.info('Dump pickle at step {}'.format(global_t))
 
             if global_t > next_save_t:
@@ -937,6 +980,12 @@ def run_a3c(args):
 
     reward_fname = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)
     pickle.dump(rewards, reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+    class_reward_fname = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
+    pickle.dump(class_rewards, class_reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+    sil_fname = folder / '{}-a3c-sil.pkl'.format(GYM_ENV_NAME)
+    pickle.dump(sil_dict, sil_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
+    rollout_fname = folder / '{}-a3c-rollout.pkl'.format(GYM_ENV_NAME)
+    pickle.dump(rollout_dict, rollout_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
     logger.info('Data saved!')
 
     sess.close()

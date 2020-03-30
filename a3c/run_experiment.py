@@ -46,6 +46,8 @@ def main():
                         help='ovverides maximum time step by a fraction')
     parser.add_argument('--grad-norm-clip', type=float, default=0.5,
                         help='gradient norm clipping')
+    parser.add_argument('--max-ep-step', type=float, default=10000,
+                        help='maximum time step for an episode (prevent breakout from stuck)')
 
     parser.add_argument('--advice-budget', type=float, default=10 * 10**7,
                         help='max global_steps allowed for rollout')

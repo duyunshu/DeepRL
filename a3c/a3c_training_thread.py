@@ -257,7 +257,7 @@ class A3CTrainingThread(CommonWorker):
         # compute and accumulate gradients
         for(ai, ri, si, vi) in zip(actions, rewards, states, values):
             if self.transformed_bellman:
-                ri = np.sign(ri) * 1.89 + ri
+                ri = np.sign(ri) * self.reward_constant + ri
                 cumsum_reward = transform_h(
                     ri + self.gamma * transform_h_inv(cumsum_reward))
             else:

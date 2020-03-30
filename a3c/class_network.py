@@ -399,9 +399,10 @@ class MultiClassNetwork(Network):
         """Load existing model."""
         assert sess is not None
         assert checkpoint_dir != ''
-        checkpoint = tf.train.get_checkpoint_state(checkpoint_dir)
-        self.saver.restore(sess, checkpoint.model_checkpoint_path)
-        logger.info("Successfully loaded: {}".format(checkpoint))
+        # checkpoint = tf.train.get_checkpoint_state(checkpoint_dir)
+        # self.saver.restore(sess, checkpoint.model_checkpoint_path)
+        self.saver.restore(sess, checkpoint_dir)
+        logger.info("Successfully loaded: {}".format(checkpoint_dir))
 
 
     def prepare_evaluate(self):

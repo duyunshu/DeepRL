@@ -132,9 +132,18 @@ class SILReplayMemory(object):
 
             assert len(self) == len(self.returns) <= self.maxlen
 
-
         x.reset()
         assert len(x) == 0
+
+    def extend_one_priority(self, x_states, x_fullstates, x_actions, x_returns, x_rollout):
+        """Use only in SIL memory."""
+        assert self.priority
+        if self.fs_size == 0:
+            self.fs_size = len(x_fullstates[0])
+
+        data = zip(x_states, x_fullstates, x_actions, x_returns, x_rollout)
+        for feature in data:
+            self.buff.add(*feature)
 
     def extend_one(self, x_states, x_fullstates, x_actions, x_returns, x_rollout):
         """Use only in exp_buffer memory, add a single batch"""
