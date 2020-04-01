@@ -49,11 +49,6 @@ def main():
     parser.add_argument('--max-ep-step', type=float, default=10000,
                         help='maximum time step for an episode (prevent breakout from stuck)')
 
-    parser.add_argument('--advice-budget', type=float, default=10 * 10**7,
-                        help='max global_steps allowed for rollout')
-    parser.add_argument('--stop-rollout', action='store_true', help='rollout switch on/off')
-    parser.set_defaults(stop_rollout=False)
-
     parser.add_argument('--eval-freq', type=int, default=1000000)
     parser.add_argument('--eval-max-steps', type=int, default=125000)
 
@@ -139,6 +134,7 @@ def main():
     parser.add_argument('--test-model', action='store_true')
     parser.set_defaults(test_model=False)
 
+    # sil parameters
     parser.add_argument('--use-sil', action='store_true',
                         help='self imitation learning loss (SIL)')
     parser.set_defaults(use_sil=False)
@@ -148,6 +144,8 @@ def main():
     parser.add_argument('--use-sil-skip', action='store_true',
                         help='test if less #sil result in worse performace')
     parser.set_defaults(use_sil_skip=False)
+
+    # rollout parameters
     parser.add_argument('--use-rollout', action='store_true',
                         help='use human model to correct actions')
     parser.set_defaults(use_rollout=False)
@@ -156,6 +154,14 @@ def main():
     parser.add_argument('--add-all-rollout', action='store_true',
                         help='add all rollout data, otherwise, add only when new return is better')
     parser.set_defaults(add_all_rollout=False)
+    parser.add_argument('--advice-budget', type=float, default=10 * 10**7,
+                        help='max global_steps allowed for rollout')
+    parser.add_argument('--stop-rollout', action='store_true', help='rollout switch on/off')
+    parser.set_defaults(stop_rollout=False)
+    parser.add_argument('--nstep-bc', type=int, default=100000,
+                        help='rollout using BC for n steps then thereafter follow a3c till terminal')
+
+    # train classifier parameters
     parser.add_argument('--train-classifier', action='store_true',
                         help='periodically retrain classifier')
     parser.set_defaults(train_classifier=False)

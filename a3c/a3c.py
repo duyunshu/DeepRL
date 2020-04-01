@@ -736,7 +736,8 @@ def run_a3c(args):
                                                    added_rollout_ctr,
                                                    args.add_all_rollout,
                                                    rollout_dict,
-                                                   args.max_ep_step)
+                                                   args.max_ep_step,
+                                                   args.nstep_bc)
                     diff_global_t, episode_end, \
                         part_end, rollout_ctr, added_rollout_ctr, add, \
                         rollout_dict = train_out

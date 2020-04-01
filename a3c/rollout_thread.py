@@ -132,9 +132,9 @@ class RolloutThread(CommonWorker):
         return returns[0]
 
     def rollout(self, a3c_sess, pretrain_sess, global_t, badstate, rollout_ctr,
-                added_rollout_ctr, add_all_rollout, rollout_dict, ep_max_steps):
+                added_rollout_ctr, add_all_rollout, rollout_dict, ep_max_steps, nstep_bc):
         """Rollout, one at a time."""
-        # a3c_sess.run(self.sync_a3c)
+        a3c_sess.run(self.sync_a3c)
         pretrain_sess.run(self.sync_pretrained)
 
         # assert pretrain_sess.run(self.local_pretrained.W_fc2).all() == \
@@ -171,11 +171,19 @@ class RolloutThread(CommonWorker):
                        interpolation=cv2.INTER_AREA)
             fullstate = self.rolloutgame.clone_full_state()
 
-            model_pi = self.local_pretrained.run_policy(pretrain_sess, state)
-            action, confidence = self.choose_action_with_high_confidence(
-                model_pi, exclude_noop=False)
-
-            confidences.append(confidence)
+            if nstep_bc > 0:
+                model_pi = self.local_pretrained.run_policy(pretrain_sess, state)
+                action, confidence = self.choose_action_with_high_confidence(
+                    model_pi, exclude_noop=False)
+                confidences.append(confidence)
+                nstep_bc -= 1
+                # print("taking action from BC, {} steps left".format(nstep_bc))
+            else:
+                # print("taking action from A3C")
+                pi_, value_, logits_ = self.local_a3c.run_policy_and_value(a3c_sess,
+                                                                           state)
+                action = self.pick_action(logits_)
+                confidences.append(pi_[action])
 
             self.rolloutgame.step(action)
 

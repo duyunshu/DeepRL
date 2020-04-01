@@ -60,6 +60,8 @@ def setup_folder(args, env_name):
             end_str+='_rollout'
             if args.add_all_rollout:
                 end_str+='_addallrollout'
+            if args.nstep_bc != 100000:
+                end_str+='_{}stepbc'.format(args.nstep_bc) 
 
         folder += end_str
 
