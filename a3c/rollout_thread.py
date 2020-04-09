@@ -32,15 +32,21 @@ class RolloutThread(CommonWorker):
     gamma = 0.99
 
     def __init__(self, thread_index, action_size, env_id,
-                 global_a3c, local_a3c,
+                 global_a3c, local_a3c, update_in_rollout, nstep_bc,
                  global_pretrained_model, local_pretrained_model,
-                 transformed_bellman=False, no_op_max=0):
-        """Initialize A3CTrainingThread class."""
-
+                 transformed_bellman=False, no_op_max=0,
+                 device='/cpu:0', entropy_beta=0.01, clip_norm=None,
+                 grad_applier=None, initial_learn_rate=0.007,
+                 learning_rate_input=None):
+        """Initialize RolloutThread class."""
         self.is_rollout_thread = True
         self.action_size = action_size
         self.thread_idx = thread_index
         self.transformed_bellman = transformed_bellman
+        self.entropy_beta = entropy_beta
+        self.clip_norm = clip_norm
+        self.initial_learning_rate = initial_learn_rate
+        self.learning_rate_input = learning_rate_input
 
         self.no_op_max = no_op_max
         self.override_num_noops = 0 if self.no_op_max == 0 else None
@@ -51,16 +57,35 @@ class RolloutThread(CommonWorker):
         logger.info("transformed_bellman: {}".format(
             colored(self.transformed_bellman,
                     "green" if self.transformed_bellman else "red")))
+        logger.info("update in rollout: {}".format(
+            colored(update_in_rollout, "green" if update_in_rollout else "red")))
+        logger.info("N-step BC: {}".format(nstep_bc))
 
         self.reward_clipped = True if self.reward_type == 'CLIP' else False
 
         # setup local a3c
         self.local_a3c = local_a3c
         self.sync_a3c = self.local_a3c.sync_from(global_a3c)
+        with tf.device(device):
+            local_vars = self.local_a3c.get_vars
+            self.local_a3c.prepare_loss(
+                entropy_beta=self.entropy_beta, critic_lr=0.5)
+            var_refs = [v._ref() for v in local_vars()]
+            self.gradients = tf.gradients(self.local_a3c.total_loss, var_refs)
+            global_vars = global_a3c.get_vars
+            if self.clip_norm is not None:
+                self.gradients, grad_norm = tf.clip_by_global_norm(
+                    self.gradients, self.clip_norm)
+            self.gradients = list(zip(self.gradients, global_vars()))
+            self.apply_gradients = grad_applier.apply_gradients(self.gradients)
 
         # setup local pretrained model
-        self.local_pretrained = local_pretrained_model
-        self.sync_pretrained = self.local_pretrained.sync_from(global_pretrained_model)
+        self.local_pretrained = None
+        if nstep_bc > 0:
+            assert local_pretrained_model is not None
+            assert global_pretrained_model is not None
+            self.local_pretrained = local_pretrained_model
+            self.sync_pretrained = self.local_pretrained.sync_from(global_pretrained_model)
 
         # setup env
         self.rolloutgame = GameState(env_id=env_id, display=False,
@@ -70,8 +95,9 @@ class RolloutThread(CommonWorker):
         self.episode_reward = 0
         self.episode_steps = 0
 
-        assert self.local_pretrained is not None
         assert self.local_a3c is not None
+        if nstep_bc > 0:
+            assert self.local_pretrained is not None
 
         self.episode = SILReplayMemory(
             self.action_size, max_len=None, gamma=self.gamma,
@@ -131,11 +157,57 @@ class RolloutThread(CommonWorker):
                     returns[i] = transform_h(rewards[i] + exp_r_t)
         return returns[0]
 
-    def rollout(self, a3c_sess, pretrain_sess, global_t, badstate, rollout_ctr,
-                added_rollout_ctr, add_all_rollout, rollout_dict, ep_max_steps, nstep_bc):
+    def update_a3c(self, sess, actions, states, rewards, values, global_t):
+        cumsum_reward = 0.0
+        actions.reverse()
+        states.reverse()
+        rewards.reverse()
+        values.reverse()
+
+        batch_state = []
+        batch_action = []
+        batch_adv = []
+        batch_cumsum_reward = []
+
+        # compute and accumulate gradients
+        for(ai, ri, si, vi) in zip(actions, rewards, states, values):
+            if self.transformed_bellman:
+                ri = np.sign(ri) * self.reward_constant + ri
+                cumsum_reward = transform_h(
+                    ri + self.gamma * transform_h_inv(cumsum_reward))
+            else:
+                cumsum_reward = ri + self.gamma * cumsum_reward
+            advantage = cumsum_reward - vi
+
+            # convert action to one-hot vector
+            a = np.zeros([self.action_size])
+            a[ai] = 1
+
+            batch_state.append(si)
+            batch_action.append(a)
+            batch_adv.append(advantage)
+            batch_cumsum_reward.append(cumsum_reward)
+
+        cur_learning_rate = self._anneal_learning_rate(global_t,
+                self.initial_learning_rate )
+
+        feed_dict = {
+            self.local_a3c.s: batch_state,
+            self.local_a3c.a: batch_action,
+            self.local_a3c.advantage: batch_adv,
+            self.local_a3c.cumulative_reward: batch_cumsum_reward,
+            self.learning_rate_input: cur_learning_rate,
+            }
+
+        sess.run(self.apply_gradients, feed_dict=feed_dict)
+
+    def rollout(self, a3c_sess, pretrain_sess, game, global_t, badstate, rollout_ctr,
+                added_rollout_ctr, add_all_rollout, rollout_dict,
+                ep_max_steps, nstep_bc, update_in_rollout):
         """Rollout, one at a time."""
         a3c_sess.run(self.sync_a3c)
-        pretrain_sess.run(self.sync_pretrained)
+        if nstep_bc > 0:
+            pretrain_sess.run(self.sync_pretrained)
 
         # assert pretrain_sess.run(self.local_pretrained.W_fc2).all() == \
         #     pretrain_sess.run(global_pretrained.W_fc2).all()
@@ -143,7 +215,10 @@ class RolloutThread(CommonWorker):
         # for each bad state in queue, do rollout till terminal (no max=20 limit)
         _, fs, a, old_return, _ = badstate
 
+        states = []
+        actions = []
         rewards = []
+        values = []
         terminals = []
         confidences = []
 
@@ -164,26 +239,36 @@ class RolloutThread(CommonWorker):
         # prevent breakout from stucking,
         # see https://github.com/openai/gym/blob/54f22cf4db2e43063093a1b15d968a57a32b6e90/gym/envs/__init__.py#L635
         while ep_max_steps > 0: #True:
+            # print(ep_max_steps)
             # self.rolloutgame.env.render()
-            # time.sleep(.1)
+            # time.sleep(0.01)
             state = cv2.resize(self.rolloutgame.s_t,
                        self.local_a3c.in_shape[:-1],
                        interpolation=cv2.INTER_AREA)
             fullstate = self.rolloutgame.clone_full_state()
 
             if nstep_bc > 0:
-                model_pi = self.local_pretrained.run_policy(pretrain_sess, state)
-                action, confidence = self.choose_action_with_high_confidence(
-                    model_pi, exclude_noop=False)
-                confidences.append(confidence)
-                nstep_bc -= 1
                 # print("taking action from BC, {} steps left".format(nstep_bc))
+                model_pi = self.local_pretrained.run_policy(pretrain_sess, state)
+                if game == "Breakout": # breakout needs some stocasity
+                    action = self.egreedy_action(model_pi, epsilon=0.01)
+                    confidences.append(model_pi[action])
+                else:
+                    action, confidence = self.choose_action_with_high_confidence(
+                                              model_pi, exclude_noop=False)
+                    confidences.append(confidence)
+                nstep_bc -= 1
             else:
                 # print("taking action from A3C")
-                pi_, value_, logits_ = self.local_a3c.run_policy_and_value(a3c_sess,
-                                                                           state)
+                pi_, _, logits_ = self.local_a3c.run_policy_and_value(a3c_sess,
+                                                                      state)
                 action = self.pick_action(logits_)
                 confidences.append(pi_[action])
+
+            value_ = self.local_a3c.run_value(a3c_sess, state)
+            values.append(value_)
+            states.append(state)
+            actions.append(action)
 
             self.rolloutgame.step(action)
 
@@ -233,13 +318,18 @@ class RolloutThread(CommonWorker):
                     if new_return > old_return:
                         add = True
                         added_rollout_ctr += 1
-                        round_t = int(math.floor(global_t/10))*10
-                        rollout_dict["added_ctr"][round_t] = added_rollout_ctr
-                        rollout_dict["total_ctr"][round_t] = rollout_ctr
-                        rollout_dict["new_return"][round_t] = new_return
-                        rollout_dict["old_return"][round_t] = old_return
+                        # update policy immediate using a good rollout
+                        if update_in_rollout:
+                            logger.info("Update A3C using rollout data")
+                            self.update_a3c(a3c_sess, actions, states, rewards, values, global_t)
                 else:
                     add = True
+
+                round_t = int(math.floor(global_t/10))*10
+                rollout_dict["added_ctr"][round_t] = added_rollout_ctr
+                rollout_dict["total_ctr"][round_t] = rollout_ctr
+                rollout_dict["new_return"][round_t] = new_return
+                rollout_dict["old_return"][round_t] = old_return
 
                 self.record_rollout(
                     score=self.episode_reward, steps=self.episode_steps,
@@ -249,11 +339,9 @@ class RolloutThread(CommonWorker):
                     mode='Rollout',
                     confidence=np.mean(confidences), episodes=None)
 
-
                 self.episode_reward = 0
                 self.episode_steps = 0
                 self.rolloutgame.reset(hard_reset=True)
-
                 break
 
         diff_local_t = self.local_t - start_local_t

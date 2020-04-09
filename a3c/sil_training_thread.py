@@ -190,23 +190,20 @@ class SILTrainingThread(CommonWorker):
 
         for _ in range(m):
             r_batch_size = 0
-            if rollout_buffer is not None and len(rollout_buffer) > self.batch_size: # and rollout_proportion>0:
-                r_batch_size = min(len(rollout_buffer),
-                                   int(self.batch_size)) # * rollout_proportion))
-                # print("ROLLOUT sample size: {}".format(r_batch_size))
-                if r_batch_size > 0:
-                    r_sample = rollout_buffer.sample(r_batch_size, beta=0.4)
-                    r_index_list, r_batch, r_weights = r_sample
-                    r_batch_state, r_action, r_batch_returns, \
-                        r_batch_fullstate, r_batch_rollout = r_batch
-                    r_batch_action = []
-                    for a in r_action:
-                        r_batch_action.append(np.argmax(a))
-                    self.pick_samples.extend_one_priority(r_batch_state,
-                        r_batch_fullstate, r_batch_action, r_batch_returns,
-                        r_batch_rollout)
+            if rollout_buffer is not None and len(rollout_buffer) > self.batch_size:
+                r_batch_size = self.batch_size
+                r_sample = rollout_buffer.sample(r_batch_size, beta=0.4)
+                r_index_list, r_batch, r_weights = r_sample
+                r_batch_state, r_action, r_batch_returns, \
+                    r_batch_fullstate, r_batch_rollout = r_batch
+                r_batch_action = []
+                for a in r_action:
+                    r_batch_action.append(np.argmax(a))
+                self.pick_samples.extend_one_priority(r_batch_state,
+                    r_batch_fullstate, r_batch_action, r_batch_returns,
+                    r_batch_rollout)
 
-            s_batch_size = self.batch_size #- r_batch_size
+            s_batch_size = self.batch_size
             s_sample = sil_memory.sample(s_batch_size , beta=0.4)
             s_index_list, s_batch, s_weights = s_sample
             s_batch_state, s_action, s_batch_returns, \
@@ -251,11 +248,11 @@ class SILTrainingThread(CommonWorker):
                 total_used += len(neg_idx)
 
             # update priority
-            self.update_priorities_once(sess, sil_memory, s_index_list, s_batch_state,
-                                        s_action, s_batch_returns)
+            self.update_priorities_once(sess, sil_memory, s_index_list,
+                                        s_batch_state, s_action, s_batch_returns)
             if r_batch_size > 0:
-                self.update_priorities_once(sess, rollout_buffer, r_index_list, r_batch_state,
-                                            r_action, r_batch_returns)
+                self.update_priorities_once(sess, rollout_buffer, r_index_list,
+                                            r_batch_state, r_action, r_batch_returns)
 
             # find the index of good samples
             if self.train_classifier:

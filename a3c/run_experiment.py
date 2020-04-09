@@ -160,6 +160,9 @@ def main():
     parser.set_defaults(stop_rollout=False)
     parser.add_argument('--nstep-bc', type=int, default=100000,
                         help='rollout using BC for n steps then thereafter follow a3c till terminal')
+    parser.add_argument('--update-in-rollout', action='store_true',
+                        help='make immediate update using rollout data')
+    parser.set_defaults(update_in_rollout=False)
 
     # train classifier parameters
     parser.add_argument('--train-classifier', action='store_true',

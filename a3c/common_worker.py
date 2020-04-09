@@ -39,6 +39,15 @@ class CommonWorker(object):
         confidence = pi_values[max_confidence_action]
         return (max_confidence_action+(1 if exclude_noop else 0)), confidence
 
+    def egreedy_action(self, pi_values, epsilon=0.01):
+        """Choose action with egreedy exploration."""
+        rand = np.random.random()
+        if rand > epsilon:
+            action = np.argmax(pi_values)
+        else:
+            action = np.random.randint(len(pi_values))
+        return action
+
     def set_start_time(self, start_time):
         """Set start time."""
         self.start_time = start_time
@@ -359,7 +368,8 @@ class CommonWorker(object):
                                 worker.net.in_shape[:-1],
                                 interpolation=cv2.INTER_AREA)
             model_pi = worker.net.run_policy(sess, state)
-            action, confidence = self.choose_action_with_high_confidence(
+
+            action, _ = self.choose_action_with_high_confidence(
                 model_pi, exclude_noop=False)
 
             # take action
@@ -429,12 +439,15 @@ class CommonWorker(object):
         episode_steps = 0
         n_episodes = 0
         while max_steps > 0:
+            # worker.game_state.env.render()
             state = cv2.resize(worker.game_state.s_t,
                                model.in_shape[:-1],
                                interpolation=cv2.INTER_AREA)
             model_pi = model.run_policy(sess, state)
-            action, confidence = self.choose_action_with_high_confidence(
+
+            action, _ = self.choose_action_with_high_confidence(
                 model_pi, exclude_noop=False)
+            # action = self.egreedy_action(model_pi, epsilon=0.01)
 
             # take action
             worker.game_state.step(action)

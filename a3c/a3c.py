@@ -56,6 +56,7 @@ def pause():
 def run_a3c(args):
     """Run A3C experiment."""
     GYM_ENV_NAME = args.gym_env.replace('-', '_')
+    GAME_NAME = args.gym_env.replace('NoFrameskip-v4','')
 
     # setup folder name and path to folder
     folder = pathlib.Path(setup_folder(args, GYM_ENV_NAME))
@@ -113,6 +114,15 @@ def run_a3c(args):
     global_pretrained_model = None
     local_pretrained_model = None
     pretrain_graph = None
+
+    # if use pretrained model as (a part of) rollout
+    # then must load pretrained model
+    # otherwise, don't load model (for saving mem)
+    if args.nstep_bc > 0:
+        assert args.load_pretrained_model
+    else:
+        assert not args.load_pretrained_model
+
     if args.load_pretrained_model:
         pretrain_graph, global_pretrained_model = setup_pretrained_model(tf,
             args, action_size, input_shape,
@@ -268,26 +278,34 @@ def run_a3c(args):
     rollout_worker = None
     if args.use_rollout:
         rollout_network = GameACFFNetwork(
-            action_size, startIndex, device=device,
+            action_size, startIndex, device="/gpu:0" if args.use_gpu else device,
             padding=args.padding, in_shape=input_shape)
 
-        rollout_local_pretrained_model = PretrainedModelNetwork(
-            pretrain_graph, action_size, startIndex,
-            padding=args.padding,
-            in_shape=input_shape, sae=args.sae_classify_demo,
-            tied_weights=args.class_tied_weights,
-            use_denoising=args.class_use_denoising,
-            noise_factor=args.class_noise_factor,
-            loss_function=args.class_loss_function,
-            use_slv=args.class_use_slv,
-            device="/gpu:0" if args.use_gpu else device)
+        rollout_local_pretrained_model = None
+        if args.nstep_bc >0:
+            rollout_local_pretrained_model = PretrainedModelNetwork(
+                pretrain_graph, action_size, startIndex,
+                padding=args.padding,
+                in_shape=input_shape, sae=args.sae_classify_demo,
+                tied_weights=args.class_tied_weights,
+                use_denoising=args.class_use_denoising,
+                noise_factor=args.class_noise_factor,
+                loss_function=args.class_loss_function,
+                use_slv=args.class_use_slv,
+                device="/gpu:0" if args.use_gpu else device)
 
         rollout_worker = RolloutThread(
             thread_index=startIndex, action_size=action_size, env_id=args.gym_env,
             global_a3c=global_network, local_a3c=rollout_network,
+            update_in_rollout=args.update_in_rollout, nstep_bc=args.nstep_bc,
             global_pretrained_model=global_pretrained_model,
             local_pretrained_model=rollout_local_pretrained_model,
-            transformed_bellman = args.transformed_bellman)
+            transformed_bellman = args.transformed_bellman,
+            device="/gpu:0" if args.use_gpu else device,
+            entropy_beta=args.entropy_beta, clip_norm=args.grad_norm_clip,
+            grad_applier=grad_applier,
+            initial_learn_rate=args.initial_learn_rate,
+            learning_rate_input=learning_rate_input)
 
         all_workers.append(rollout_worker)
         startIndex += 1
@@ -404,25 +422,11 @@ def run_a3c(args):
     # summary_op = tf.summary.merge_all()
     summ_file = args.save_to+'log/a3c/{}/'.format(GYM_ENV_NAME) + str(folder)[58:] # str(folder)[12:]
     summary_writer = tf.summary.FileWriter(summ_file, sess.graph)
-    # summary_writer_class = None
-    # if args.use_correction:
-    #     summary_writer_class = tf.summary.FileWriter(summ_file,
-    #                                                  pretrained_model_sess.graph)
+
     # init or load checkpoint with saver
     root_saver = tf.train.Saver(max_to_keep=1)
-    # a3c
     saver = tf.train.Saver(max_to_keep=6)
     best_saver = tf.train.Saver(max_to_keep=1)
-    # # classifier
-    # class_root_saver = None
-    # class_saver = None
-    # best_class_saver = None
-    # class_folder = str(folder) + '/classifier'
-    # class_folder = pathlib.Path(class_folder)
-    # if args.use_correction:
-    #     class_root_saver = tf.train.Saver(max_to_keep=1)
-    #     class_saver = tf.train.Saver(max_to_keep=6)
-    #     best_class_saver = tf.train.Saver(max_to_keep=1)
 
     checkpoint = tf.train.get_checkpoint_state(str(folder))
     if checkpoint and checkpoint.model_checkpoint_path:
@@ -449,17 +453,6 @@ def run_a3c(args):
         reward_file = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)
         rewards = pickle.load(reward_file.open('rb'))
 
-        # if args.use_correction:
-        #     checkpoint_class = tf.train.get_checkpoint_state(str(class_folder))
-        #     ckpt_path = checkpoint_class.model_checkpoint_path
-        #     if checkpoint_class and ckpt_path:
-        #         class_root_saver.restore(pretrained_model_folder, ckpt_path)
-        #         logger.info("classifier checkpoint loaded:{}".format(ckpt_path))
-        #         pretrain_global_t = int(ckpt_path.split("-")[-1])
-        #         logger.info(">>> classifier global step: {}".format(pretrain_global_t))
-        #         pretrain_t_file = folder / 'pretrain_global_t'
-        #         with pretrain_t_file.open('r') as f:
-        #             pretrain_global_t = int(f.read())
     else:
         logger.warning("Could not find old checkpoint")
         # set wall time
@@ -468,9 +461,6 @@ def run_a3c(args):
         prepare_dir(folder / 'model_checkpoints', empty=True)
         prepare_dir(folder / 'model_best', empty=True)
         prepare_dir(folder / 'frames', empty=True)
-        # if args.use_correction:
-        #     prepare_dir(class_folder / 'class_model_checkpoints', empty=True)
-        #     prepare_dir(class_folder / 'class_model_best', empty=True)
 
     lock = threading.Lock()
 
@@ -552,7 +542,6 @@ def run_a3c(args):
             num_a3c_used_list = []
             num_rollout_used_list = []
 
-
         elif parallel_worker.is_rollout_thread:
             rollout_ctr = 0
             added_rollout_ctr = 0
@@ -604,20 +593,19 @@ def run_a3c(args):
                         sil_train_flag = True
 
                 if sil_train_flag:
-                    # print(global_t)
                     sil_train_flag = False
                     th_ctr.get()
 
                     if args.stop_rollout and class_last_reward <= last_reward:
                         _rollout_proportion = 0
                         _stop_rollout = True
-                        # logger.info("SIL: stop sampling from rollout")
 
                     train_out = parallel_worker.sil_train(
                         sess, global_t, shared_memory, sil_ctr, m_repeat,
                         rollout_buffer=rollout_buffer,
                         rollout_proportion=_rollout_proportion,
                         stop_rollout=_stop_rollout)
+
                     sil_ctr, total_used, num_a3c_used, \
                         num_rollout_sampled, num_rollout_used, \
                         goodstate, badstate = train_out
@@ -732,12 +720,14 @@ def run_a3c(args):
                     _, _, sample = badstate_queue.get()
 
                     train_out = parallel_worker.rollout(sess, pretrain_sess,
+                                                   GAME_NAME,
                                                    global_t, sample, rollout_ctr,
                                                    added_rollout_ctr,
                                                    args.add_all_rollout,
                                                    rollout_dict,
                                                    args.max_ep_step,
-                                                   args.nstep_bc)
+                                                   args.nstep_bc,
+                                                   args.update_in_rollout)
                     diff_global_t, episode_end, \
                         part_end, rollout_ctr, added_rollout_ctr, add, \
                         rollout_dict = train_out
@@ -746,7 +736,6 @@ def run_a3c(args):
                     # and only add if new return is better
                     if part_end and add:
                         rollout_buffer.extend(parallel_worker.episode)
-
 
                     parallel_worker.episode.reset()
 
@@ -871,13 +860,7 @@ def run_a3c(args):
                 checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
                 saver.save(sess, str(checkpt_file), global_step=global_t,
                         write_meta_graph=False)
-                # # save classifier
-                # if args.use_correction and class_saver is not None:
-                #     checkpt_file = folder / 'class_model_checkpoints'
-                #     checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
-                #     class_saver.save(pretrained_model_sess, str(checkpt_file),
-                #         global_step=global_t,
-                #         write_meta_graph=False)
+
 
     def signal_handler(signal, frame):
         nonlocal stop_req
@@ -900,26 +883,6 @@ def run_a3c(args):
             best_checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
             best_saver.save(sess, str(best_checkpt_file))
 
-    # def class_save_best_model(test_reward):
-    #     """Save best classifier model's parameters and reward to file.
-    #
-    #     Keyword arguments:
-    #     test_reward -- testing total average reward
-    #     best_saver -- tf saver object
-    #     sess -- tf session
-    #     """
-    #     nonlocal class_best_model_reward
-    #     if test_reward > class_best_model_reward:
-    #         class_best_model_reward = test_reward
-    #         best_class_reward_file = class_folder / 'class_model_best/best_model_reward'
-    #         with best_class_reward_file.open('w') as f:
-    #             f.write(str(class_best_model_reward))
-    #
-    #         best_checkpt_file = class_folder / 'class_model_best'
-    #         best_checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
-    #         best_
-    #
-    #         best_class_saver.save(pretrained_model_sess, str(best_checkpt_file))
 
     train_threads = []
     th_ctr = Queue()
@@ -969,14 +932,6 @@ def run_a3c(args):
 
     checkpoint_file = str(folder / '{}_checkpoint_a3c'.format(GYM_ENV_NAME))
     root_saver.save(sess, checkpoint_file, global_step=global_t)
-
-    # if args.use_correction:
-    #     pretrain_gt_fname = class_folder / 'pretrain_global_t'
-    #     with pretrain_gt_fname.open('w') as f:
-    #         f.write(str(pretrain_global_t))
-    #     checkpoint_file_class = str(class_folder / '{}_checkpoint_class'.format(GYM_ENV_NAME))
-    #     class_root_saver.save(pretrained_model_sess, checkpoint_file,
-    #         global_step=pretrain_global_t)
 
 
     reward_fname = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)

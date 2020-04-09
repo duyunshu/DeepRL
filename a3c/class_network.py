@@ -29,10 +29,6 @@ class Network(ABC):
         self.action_size = action_size
         self._thread_index = thread_index
         self._device = device
-        # if device=="/cpu:0":
-        #     self._device = device
-        #     import os
-        #     os.environ["CUDA_VISIBLE_DEVICES"]="-1"
 
 
     @abstractmethod
@@ -137,12 +133,13 @@ class Network(ABC):
 
         sync_ops = []
 
-        with tf.name_scope(name, "Network", []) as name:
-            for(src_var, dst_var) in zip(src_vars, dst_vars):
-                sync_op = tf.assign(dst_var, src_var)
-                sync_ops.append(sync_op)
+        with tf.device(self._device):
+            with tf.name_scope(name, "Network", []) as name:
+                for(src_var, dst_var) in zip(src_vars, dst_vars):
+                    sync_op = tf.assign(dst_var, src_var)
+                    sync_ops.append(sync_op)
 
-            return tf.group(*sync_ops, name=name)
+                return tf.group(*sync_ops, name=name)
 
     def build_grad_cam_grads(self):
         """Compute Grad-CAM from last convolutional layer after activation.
