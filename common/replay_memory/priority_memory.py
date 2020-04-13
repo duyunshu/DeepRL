@@ -28,7 +28,7 @@ class ReplayBuffer(object):
             self._storage.append(data)
         else:
             self._storage[self._next_idx] = data
-        # print("next idx,", self._next_idx, "len storage", len(self._storage))
+
         self._next_idx = (self._next_idx + 1) % self._maxsize
 
     def _encode_sample(self, idxes):

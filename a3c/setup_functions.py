@@ -64,6 +64,8 @@ def setup_folder(args, env_name):
                 end_str+='_{}stepbc'.format(args.nstep_bc)
             if args.update_in_rollout:
                 end_str+='_updateinrollout' 
+            if args.delay_rollout != 100:
+                end_str+='_delayrollout{}'.format(args.delay_rollout)
 
         folder += end_str
 

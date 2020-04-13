@@ -154,7 +154,7 @@ def main():
     parser.add_argument('--add-all-rollout', action='store_true',
                         help='add all rollout data, otherwise, add only when new return is better')
     parser.set_defaults(add_all_rollout=False)
-    parser.add_argument('--advice-budget', type=float, default=10 * 10**7,
+    parser.add_argument('--advice-budget', type=float, default=10*10**7,
                         help='max global_steps allowed for rollout')
     parser.add_argument('--stop-rollout', action='store_true', help='rollout switch on/off')
     parser.set_defaults(stop_rollout=False)
@@ -163,6 +163,8 @@ def main():
     parser.add_argument('--update-in-rollout', action='store_true',
                         help='make immediate update using rollout data')
     parser.set_defaults(update_in_rollout=False)
+    parser.add_argument('--delay-rollout', type=int, default=100,
+                        help='start rollout n-eval-freq steps late (when using self-rollout, wait till it has learned sth)')
 
     # train classifier parameters
     parser.add_argument('--train-classifier', action='store_true',

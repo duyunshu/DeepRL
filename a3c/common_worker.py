@@ -106,6 +106,7 @@ class CommonWorker(object):
         episode_steps = 0
         n_episodes = 0
         while max_steps > 0:
+            # worker.game_state.env.render()
             state = cv2.resize(worker.game_state.s_t,
                                worker.local_net.in_shape[:-1],
                                interpolation=cv2.INTER_AREA)

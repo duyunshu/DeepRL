@@ -118,7 +118,7 @@ def run_a3c(args):
     # if use pretrained model as (a part of) rollout
     # then must load pretrained model
     # otherwise, don't load model (for saving mem)
-    if args.nstep_bc > 0:
+    if args.use_rollout and args.nstep_bc > 0:
         assert args.load_pretrained_model
     else:
         assert not args.load_pretrained_model
@@ -481,7 +481,7 @@ def run_a3c(args):
     class_last_reward = -(sys.maxsize)
 
     def train_function(parallel_idx, th_ctr, ep_queue, net_updates,
-                       class_updates, goodstate_queue, badstate_queue):
+                       class_updates, goodstate_queue, badstate_queue, badstate_list):
         nonlocal global_t, step_t, rewards, class_rewards, lock, next_global_t, \
             next_save_t, last_temp_global_t, \
             shared_memory, exp_buffer, rollout_buffer, \
@@ -541,6 +541,7 @@ def run_a3c(args):
             sil_train_flag = args.load_memory and len(shared_memory) >= min_mem
             num_a3c_used_list = []
             num_rollout_used_list = []
+            next_idx = 0
 
         elif parallel_worker.is_rollout_thread:
             rollout_ctr = 0
@@ -638,6 +639,20 @@ def run_a3c(args):
                                 badstate_queue.get()
                             badstate_queue.put(badstate.get())
 
+                        #     ####the list takes care of "old memory out first"
+                        #     if next_idx >= len(badstate_list):
+                        #         badstate_list.append(badstate.get())
+                        #     else:
+                        #         badstate_list[next_idx] = badstate.get()
+                        #     next_idx = (next_idx + 1) % args.memory_length
+                        #
+                        # for i in range(len(badstate_list)):
+                        #     if badstate_queue.full():
+                        #         badstate_queue.get()
+                        #     badstate_queue.put(badstate_list[i])
+                        #     ####the list takes care of "old memory out first"
+
+
                     with goodstate.mutex:
                         goodstate.queue.clear()
                     with badstate.mutex:
@@ -716,7 +731,8 @@ def run_a3c(args):
                 th_ctr.get()
                 diff_global_t = 0
 
-                if global_t < args.advice_budget and _rollout_proportion > 0:
+                if global_t < args.advice_budget and _rollout_proportion > 0 and \
+                   global_t > (args.delay_rollout*args.eval_freq):
                     _, _, sample = badstate_queue.get()
 
                     train_out = parallel_worker.rollout(sess, pretrain_sess,
@@ -893,6 +909,7 @@ def run_a3c(args):
     class_updates = None
     goodstate_queue = None
     badstate_queue = None
+    badstate_list = []
     if args.use_sil:
         episodes_queue = Queue()
         net_updates = Queue()
@@ -904,7 +921,7 @@ def run_a3c(args):
         worker_thread = Thread(
             target=train_function,
             args=(i, th_ctr, episodes_queue, net_updates, class_updates,
-                goodstate_queue, badstate_queue,))
+                goodstate_queue, badstate_queue, badstate_list,))
         train_threads.append(worker_thread)
 
     signal.signal(signal.SIGINT, signal_handler)
