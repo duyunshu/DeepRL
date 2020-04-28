@@ -201,8 +201,8 @@ class RolloutThread(CommonWorker):
 
         sess.run(self.apply_gradients, feed_dict=feed_dict)
 
-    def rollout(self, a3c_sess, pretrain_sess, game, global_t, badstate, rollout_ctr,
-                added_rollout_ctr, add_all_rollout, rollout_dict,
+    def rollout(self, a3c_sess, pretrain_sess, game, global_t, badstate,
+                rollout_ctr, added_rollout_ctr, add_all_rollout, rollout_dict,
                 ep_max_steps, nstep_bc, update_in_rollout):
         """Rollout, one at a time."""
         a3c_sess.run(self.sync_a3c)

@@ -171,7 +171,8 @@ class SILTrainingThread(CommonWorker):
         self.writer.flush()
 
     def sil_train(self, sess, global_t, sil_memory, sil_ctr, m=4,
-                  rollout_buffer=None, rollout_proportion=0, stop_rollout=False):
+                  rollout_buffer=None, rollout_proportion=0, stop_rollout=False,
+                  roll_any=False):
         """Self-imitation learning process."""
 
         # copy weights from shared to local
@@ -182,7 +183,7 @@ class SILTrainingThread(CommonWorker):
 
         badstate_queue = Queue()
         goodstate_queue = Queue()
-        # sample_queue = PriorityQueue()
+
         total_used = 0
         num_a3c_used = 0
         num_rollout_sampled = 0
@@ -265,7 +266,9 @@ class SILTrainingThread(CommonWorker):
                          deepcopy([ batch_rollout[i] ]))
                         )
             # find the index of bad sampless
-            if self.use_rollout and not stop_rollout:
+            # if we are rolling out specifically from bad states only
+            # otherwise, just let rollout sample from shared_memory
+            if self.use_rollout and not stop_rollout and not roll_any:
                 for i in neg_idx:
                     badstate_queue.put(
                          (  adv[i], #first sort by adv

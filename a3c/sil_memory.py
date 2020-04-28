@@ -231,33 +231,18 @@ class SILReplayMemory(object):
             batch = (states, actions, returns, fullstates, from_rollout)
         return idxes, batch, weights
 
-    # def sample_by_actions(self, batch_size, beta=0.4):
-    #     """Return a random batch sample from the exp_buffer (oversampling)."""
-    #     assert len(self) >= batch_size
-    #     assert not self.priority
-    #
-    #     shape = (batch_size, self.height, self.width, self.phi_length)
-    #     states = np.zeros(shape, dtype=np.uint8)
-    #     actions = np.zeros((batch_size, self.num_actions), dtype=np.float32)
-    #     returns = np.zeros(batch_size, dtype=np.float32)
-    #     fullstates = np.zeros((batch_size, len(self.fullstates[0])), dtype=np.uint8)
-    #
-    #     if self.priority:
-    #         sample = self.buff.sample(batch_size, beta)
-    #         states, acts, returns, weights, idxes = sample
-    #         for i, a in enumerate(acts):
-    #             actions[i][a] = 1  # one-hot vector
-    #         batch = (states, actions, returns)
-    #     else:
-    #         weights = np.ones(batch_size, dtype=np.float32)
-    #         idxes = random.sample(range(0, len(self.states)), batch_size)
-    #         for i, rand_i in enumerate(idxes):
-    #             states[i] = np.copy(self.states[rand_i])
-    #             actions[i][self.actions[rand_i]] = 1  # one-hot vector
-    #             returns[i] = self.returns[rand_i]
-    #             fullstates[i] = np.copy(self.fullstates[rand_i])
-    #         batch = (states, actions, returns, fullstates)
-    #     return idxes, batch, weights
+    def sample_one_random(self):
+        """Return one random sample from shared_buffer without priority.
+           Used in prioritized memory when sampling without priority only
+           Take one sample at a time
+        """
+        assert len(self) >= 1
+        assert self.priority
+
+        sample = self.buff.sample_rand(1)
+        states, fullstates, acts, returns, from_rollout = sample
+        batch = (states, fullstates, acts, returns, from_rollout)
+        return batch
 
     def set_weights(self, indexes, priors):
         """Set weights of the samples according to index."""

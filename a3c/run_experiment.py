@@ -163,8 +163,14 @@ def main():
     parser.add_argument('--update-in-rollout', action='store_true',
                         help='make immediate update using rollout data')
     parser.set_defaults(update_in_rollout=False)
-    parser.add_argument('--delay-rollout', type=int, default=100,
+    parser.add_argument('--delay-rollout', type=int, default=0,
                         help='start rollout n-eval-freq steps late (when using self-rollout, wait till it has learned sth)')
+    parser.add_argument('--one-buffer', action='store_true',
+                        help='use one buffer for all workers, no separete rollout buffer')
+    parser.add_argument('--roll-any', action='store_true',
+                        help='rollout from any random state (not just bad ones)')
+    parser.set_defaults(roll_any=False)
+    parser.set_defaults(one_rollout=False)
 
     # train classifier parameters
     parser.add_argument('--train-classifier', action='store_true',

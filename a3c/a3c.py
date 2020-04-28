@@ -152,7 +152,7 @@ def run_a3c(args):
             phi_length=input_shape[2], priority=args.priority_memory,
             reward_constant=args.reward_constant)
 
-        if args.use_rollout:
+        if args.use_rollout and not args.one_buffer:
             rollout_buffer = SILReplayMemory(
                 action_size, max_len=args.memory_length, gamma=args.gamma,
                 clip=False if args.unclipped_reward else True,
@@ -228,15 +228,19 @@ def run_a3c(args):
                                         len(temp_memory3), idx))
                         temp_memory3.reset()
 
-            # log memory information
-            shared_memory.log()
             del temp_memory
-            if args.use_rollout:
-                rollout_buffer.log()
+            if args.use_rollout and not args.one_buffer:
+                pass
                 # del temp_memory2
             if args.train_classifier:
-                exp_buffer.log()
                 del temp_memory3
+
+        # log memory information
+        shared_memory.log()
+        if args.use_rollout and not args.one_buffer:
+            rollout_buffer.log()
+        if args.train_classifier:
+            exp_buffer.log()
 
     ############## Setup Thread Workers BEGIN ################
     # one sil thread, one classifier thread, one rollout thread, others are a3c
@@ -605,7 +609,8 @@ def run_a3c(args):
                         sess, global_t, shared_memory, sil_ctr, m_repeat,
                         rollout_buffer=rollout_buffer,
                         rollout_proportion=_rollout_proportion,
-                        stop_rollout=_stop_rollout)
+                        stop_rollout=_stop_rollout,
+                        roll_any=args.roll_any)
 
                     sil_ctr, total_used, num_a3c_used, \
                         num_rollout_sampled, num_rollout_used, \
@@ -629,7 +634,9 @@ def run_a3c(args):
                         while not goodstate.empty():
                             goodstate_queue.put(goodstate.get())
 
-                    if args.use_rollout:
+                    # add to badstate_queue if we are rolling out specifically from bad states only
+                    # otherwise, just let rollout sample from shared_memory
+                    if args.use_rollout and not args.roll_any:
                         while not badstate.empty():
                             if badstate_queue.full():
                                 #TODO we are removing the ones with smallest adv
@@ -669,8 +676,11 @@ def run_a3c(args):
                                               global_t=global_t)
 
                         if sil_ctr % 100 == 0:
+                            rollout_buffsize = 0
+                            if not args.one_buffer:
+                                rollout_buffsize = len(rollout_buffer)
                             log_data = (sil_ctr, len(shared_memory),
-                                        len(rollout_buffer),
+                                        rollout_buffsize,
                                         total_used, args.batch_size*m_repeat,
                                         num_a3c_used,
                                         num_rollout_sampled,
@@ -732,8 +742,13 @@ def run_a3c(args):
                 diff_global_t = 0
 
                 if global_t < args.advice_budget and _rollout_proportion > 0 and \
-                   global_t > (args.delay_rollout*args.eval_freq):
-                    _, _, sample = badstate_queue.get()
+                   global_t > (args.delay_rollout*args.eval_freq) and \
+                   len(shared_memory) >= 1:
+
+                    if not args.roll_any:
+                        _, _, sample = badstate_queue.get()
+                    else:
+                        sample = shared_memory.sample_one_random()
 
                     train_out = parallel_worker.rollout(sess, pretrain_sess,
                                                    GAME_NAME,
@@ -751,7 +766,10 @@ def run_a3c(args):
                     # should always part_end,
                     # and only add if new return is better
                     if part_end and add:
-                        rollout_buffer.extend(parallel_worker.episode)
+                        if not args.one_buffer:
+                            rollout_buffer.extend(parallel_worker.episode)
+                        else:
+                            shared_memory.extend(parallel_worker.episode)
 
                     parallel_worker.episode.reset()
 

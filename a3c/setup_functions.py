@@ -58,13 +58,17 @@ def setup_folder(args, env_name):
 
         if args.use_rollout:
             end_str+='_rollout'
+            if args.one_buffer:
+                end_str+="_onebuffer"
+            if args.roll_any:
+                end_str+="_rollany"
             if args.add_all_rollout:
                 end_str+='_addallrollout'
             if args.nstep_bc != 100000:
                 end_str+='_{}stepbc'.format(args.nstep_bc)
             if args.update_in_rollout:
-                end_str+='_updateinrollout' 
-            if args.delay_rollout != 100:
+                end_str+='_updateinrollout'
+            if args.delay_rollout > 0:
                 end_str+='_delayrollout{}'.format(args.delay_rollout)
 
         folder += end_str
