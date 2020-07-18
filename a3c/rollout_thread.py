@@ -6,7 +6,6 @@ import tensorflow as tf
 import time
 import matplotlib.pyplot as plt
 import math
-import matplotlib.pyplot as plt
 
 from common.game_state import GameState
 from common.game_state import get_wrapper_by_name
@@ -95,6 +94,8 @@ class RolloutThread(CommonWorker):
         self.episode_reward = 0
         self.episode_steps = 0
 
+        self.action_meaning = self.rolloutgame.env.unwrapped.get_action_meanings()
+
         assert self.local_a3c is not None
         if nstep_bc > 0:
             assert self.local_pretrained is not None
@@ -110,7 +111,7 @@ class RolloutThread(CommonWorker):
 
     def record_rollout(self, score=0, steps=0,
                        old_return=0, new_return=0,
-                       global_t=0, rollout_ctr=0, added_rollout_ctr=0,
+                       global_t=0, rollout_ctr=0, rollout_added_ctr=0,
                        mode='Rollout', confidence=None, episodes=None):
         """Record rollout summary."""
         summary = tf.Summary()
@@ -124,8 +125,8 @@ class RolloutThread(CommonWorker):
                           simple_value=float(steps))
         summary.value.add(tag='{}/all_rollout_ctr'.format(mode),
                           simple_value=float(rollout_ctr))
-        summary.value.add(tag='{}/added_rollout_ctr'.format(mode),
-                          simple_value=float(added_rollout_ctr))
+        summary.value.add(tag='{}/rollout_added_ctr'.format(mode),
+                          simple_value=float(rollout_added_ctr))
         if confidence is not None:
             summary.value.add(tag='{}/advice-confidence'.format(mode),
                               simple_value=float(confidence))
@@ -201,9 +202,10 @@ class RolloutThread(CommonWorker):
 
         sess.run(self.apply_gradients, feed_dict=feed_dict)
 
-    def rollout(self, a3c_sess, pretrain_sess, game, global_t, badstate,
-                rollout_ctr, added_rollout_ctr, add_all_rollout, rollout_dict,
-                ep_max_steps, nstep_bc, update_in_rollout):
+    def rollout(self, a3c_sess, folder, pretrain_sess, game, global_t, badstate,
+                rollout_ctr, rollout_added_ctr, rollout_sample_used,
+                rollout_new_return, rollout_old_return,
+                add_all_rollout, ep_max_steps, nstep_bc, update_in_rollout):
         """Rollout, one at a time."""
         a3c_sess.run(self.sync_a3c)
         if nstep_bc > 0:
@@ -213,7 +215,7 @@ class RolloutThread(CommonWorker):
         #     pretrain_sess.run(global_pretrained.W_fc2).all()
 
         # for each bad state in queue, do rollout till terminal (no max=20 limit)
-        _, fs, a, old_return, _ = badstate
+        _, fs, old_a, old_return, _, _ = badstate
 
         states = []
         actions = []
@@ -235,6 +237,13 @@ class RolloutThread(CommonWorker):
         del fs_check
 
         start_local_t = self.local_t
+        self.rolloutgame.step(0)
+        # self.rolloutgame.update()
+
+        # # record video of rollout
+        # video_buffer = []
+        # init_img = self.rolloutgame.get_screen_rgb()
+        # video_buffer.append(init_img)
 
         # prevent breakout from stucking,
         # see https://github.com/openai/gym/blob/54f22cf4db2e43063093a1b15d968a57a32b6e90/gym/envs/__init__.py#L635
@@ -277,6 +286,9 @@ class RolloutThread(CommonWorker):
             reward = self.rolloutgame.reward
             terminal = self.rolloutgame.terminal
             terminals.append(terminal)
+            # print(reward, terminal)
+
+            # video_buffer.append(self.rolloutgame.get_screen_rgb())
 
             self.episode_reward += reward
 
@@ -303,7 +315,7 @@ class RolloutThread(CommonWorker):
                 terminal_end = get_wrapper_by_name(env, name).was_real_done
                 if rollout_ctr % 10 == 0 and rollout_ctr > 0:
                     log_msg = "ROLLOUT: rollout_ctr={} added_rollout_ct={} worker={} global_t={} local_t={}".format(
-                        rollout_ctr, added_rollout_ctr, self.thread_idx, global_t, self.local_t)
+                        rollout_ctr, rollout_added_ctr, self.thread_idx, global_t, self.local_t)
                     score_str = colored("score={}".format(
                         self.episode_reward), "magenta")
                     steps_str = colored("steps={}".format(
@@ -314,28 +326,50 @@ class RolloutThread(CommonWorker):
                     logger.info(log_msg)
 
                 new_return = self.compute_return_for_state(rewards, terminals)
+                # print("new&old returns: ",new_return, old_return)
                 if not add_all_rollout:
+                    # if game == "Pong":
+                    #     # print("add old return for Pong")
+                    #     old_return += 0.1
                     if new_return > old_return:
                         add = True
-                        added_rollout_ctr += 1
-                        # update policy immediate using a good rollout
-                        if update_in_rollout:
-                            logger.info("Update A3C using rollout data")
-                            self.update_a3c(a3c_sess, actions, states, rewards, values, global_t)
+
                 else:
                     add = True
 
-                round_t = int(math.floor(global_t/10))*10
-                rollout_dict["added_ctr"][round_t] = added_rollout_ctr
-                rollout_dict["total_ctr"][round_t] = rollout_ctr
-                rollout_dict["new_return"][round_t] = new_return
-                rollout_dict["old_return"][round_t] = old_return
+                if add:
+                    rollout_added_ctr += 1
+                    rollout_new_return += new_return
+                    rollout_old_return += old_return
+                    # update policy immediate using a good rollout
+                    if update_in_rollout:
+                        logger.info("Update A3C using rollout data")
+                        self.update_a3c(a3c_sess, actions, states, rewards, values, global_t)
+                        rollout_sample_used += len(actions)
+
+                # if add and old_a != actions[-1]:
+                #     # save the img of the rollout state, check old_action vs. new_action
+                #     plt.imshow(init_img)
+                #     plt.axis('off')
+                #     plt.title("old: "+str(self.action_meaning[old_a])+
+                #               " new: "+str(self.action_meaning[actions[-1]]))
+                #     file = 'rollout/image{ep:010d}'.format(ep=global_t)
+                #     plt.savefig(str(folder / file),bbox_inches='tight')
+                #     # save the rollout video
+                #     time_per_step = 0.0167
+                #     images = np.array(video_buffer)
+                #     file = 'rollout/video{ep:010d}'.format(ep=global_t)
+                #     duration = len(images)*time_per_step
+                #     make_movie(images, str(folder / file),
+                #                duration=duration, true_image=True,
+                #                salience=False)
+                # del video_buffer
 
                 self.record_rollout(
                     score=self.episode_reward, steps=self.episode_steps,
                     old_return=old_return, new_return=new_return,
                     global_t=global_t, rollout_ctr=rollout_ctr,
-                    added_rollout_ctr=added_rollout_ctr,
+                    rollout_added_ctr=rollout_added_ctr,
                     mode='Rollout',
                     confidence=np.mean(confidences), episodes=None)
 
@@ -345,5 +379,7 @@ class RolloutThread(CommonWorker):
                 break
 
         diff_local_t = self.local_t - start_local_t
+
         return diff_local_t, terminal_end, terminal_pseudo, rollout_ctr, \
-               added_rollout_ctr, add, rollout_dict
+               rollout_added_ctr, add, rollout_sample_used, \
+               rollout_new_return, rollout_old_return

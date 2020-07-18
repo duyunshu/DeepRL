@@ -29,6 +29,7 @@ class SILReplayMemory(object):
             self.returns = []
             self.fullstates = []  # for the purpose of restore to a state
             self.from_rollout = [] # record if an experience is from rollout
+            self.refreshed = [] # record if an experience has been refreshed (in new buffer)
 
         self.priority = priority
         self.num_actions = num_actions
@@ -52,7 +53,7 @@ class SILReplayMemory(object):
         logger.info("reward_constant: {}".format(self.reward_constant))
         logger.info("memory size: {}".format(self.__len__()))
 
-    def add_item(self, s, fs, a, rew, t, from_rollout=False):
+    def add_item(self, s, fs, a, rew, t, from_rollout=False, refreshed=False):
         """Use only for episode memory."""
         assert len(self.returns) == 0
         assert not self.priority
@@ -65,6 +66,7 @@ class SILReplayMemory(object):
         self.rewards.append(rew)
         self.terminal.append(t)
         self.from_rollout.append(from_rollout)
+        self.refreshed.append(refreshed)
 
     def get_data(self):
         """Get data."""
@@ -74,9 +76,10 @@ class SILReplayMemory(object):
                 deepcopy(self.actions),
                 deepcopy(self.rewards),
                 deepcopy(self.terminal),
-                deepcopy(self.from_rollout))
+                deepcopy(self.from_rollout),
+                deepcopy(self.refreshed))
 
-    def set_data(self, s, fs, a, r, t, from_rollout):
+    def set_data(self, s, fs, a, r, t, from_rollout, refreshed):
         """Set data."""
         assert not self.priority
         self.states = s
@@ -85,6 +88,7 @@ class SILReplayMemory(object):
         self.rewards = r
         self.terminal = t
         self.from_rollout = from_rollout
+        self.refreshed = refreshed
 
     def reset(self):
         """Reset memory."""
@@ -96,6 +100,7 @@ class SILReplayMemory(object):
         self.terminal.clear()
         self.returns.clear()
         self.from_rollout.clear()
+        self.refreshed.clear()
 
     def shape(self):
         """Return shape of state."""
@@ -111,7 +116,8 @@ class SILReplayMemory(object):
             x.rewards, x.terminal, self.gamma, self.clip, self.reward_constant)
 
         if self.priority:
-            data = zip(x.states, x.fullstates, x.actions, x_returns, x.from_rollout)
+            data = zip(x.states, x.fullstates, x.actions, x_returns,
+                       x.from_rollout, x.refreshed)
             for feature in data:
                 self.buff.add(*feature)
         else:
@@ -120,6 +126,7 @@ class SILReplayMemory(object):
             self.actions.extend(x.actions)
             self.returns.extend(x_returns)
             self.from_rollout.extend(x.from_rollout)
+            self.refreshed.extend(x.refreshed)
 
             if len(self) > self.maxlen:
                 st_slice = len(self) - self.maxlen
@@ -128,6 +135,7 @@ class SILReplayMemory(object):
                 self.actions = self.actions[st_slice:]
                 self.returns = self.returns[st_slice:]
                 self.from_rollout = self.from_rollout[st_slice:]
+                self.refreshed = self.refreshed[st_slice:]
                 assert len(self) == self.maxlen
 
             assert len(self) == len(self.returns) <= self.maxlen
@@ -135,17 +143,17 @@ class SILReplayMemory(object):
         x.reset()
         assert len(x) == 0
 
-    def extend_one_priority(self, x_states, x_fullstates, x_actions, x_returns, x_rollout):
+    def extend_one_priority(self, x_states, x_fullstates, x_actions, x_returns, x_rollout, x_refresh):
         """Use only in SIL memory."""
         assert self.priority
         if self.fs_size == 0:
             self.fs_size = len(x_fullstates[0])
 
-        data = zip(x_states, x_fullstates, x_actions, x_returns, x_rollout)
+        data = zip(x_states, x_fullstates, x_actions, x_returns, x_rollout, x_refresh)
         for feature in data:
             self.buff.add(*feature)
 
-    def extend_one(self, x_states, x_fullstates, x_actions, x_returns, x_rollout):
+    def extend_one(self, x_states, x_fullstates, x_actions, x_returns, x_rollout, x_refresh):
         """Use only in exp_buffer memory, add a single batch"""
         assert not self.priority
 
@@ -154,6 +162,7 @@ class SILReplayMemory(object):
         self.actions.extend(x_actions)
         self.returns.extend(x_returns)
         self.from_rollout.extend(x_rollout)
+        self.refreshed.extend(x_refresh)
 
         if len(self) > self.maxlen:
             st_slice = len(self) - self.maxlen
@@ -162,6 +171,7 @@ class SILReplayMemory(object):
             self.actions = self.actions[st_slice:]
             self.returns = self.returns[st_slice:]
             self.from_rollout = self.from_rollout[st_slice:]
+            self.refreshed = self.refreshed[st_slice:]
             assert len(self) == self.maxlen
 
         assert len(self) == len(self.returns) <= self.maxlen
@@ -211,14 +221,15 @@ class SILReplayMemory(object):
         assert self.fs_size != 0
         fullstates = np.zeros((batch_size, self.fs_size), dtype=np.uint8)
         from_rollout = np.zeros(batch_size, dtype=bool)
+        refreshed = np.zeros(batch_size, dtype=bool)
 
         if self.priority:
             sample = self.buff.sample(batch_size, beta)
-            states, fullstates, acts, returns, from_rollout, \
+            states, fullstates, acts, returns, from_rollout, refreshed, \
                 weights, idxes = sample
             for i, a in enumerate(acts):
                 actions[i][a] = 1  # one-hot vector
-            batch = (states, actions, returns, fullstates, from_rollout)
+            batch = (states, actions, returns, fullstates, from_rollout, refreshed)
         else:
             weights = np.ones(batch_size, dtype=np.float32)
             idxes = random.sample(range(0, len(self.states)), batch_size)
@@ -228,7 +239,8 @@ class SILReplayMemory(object):
                 returns[i] = self.returns[rand_i]
                 fullstates[i] = np.copy(self.fullstates[rand_i])
                 from_rollout[i] = self.from_rollout[rand_i]
-            batch = (states, actions, returns, fullstates, from_rollout)
+                refreshed[i] = self.refreshed[rand_i]
+            batch = (states, actions, returns, fullstates, from_rollout, refreshed)
         return idxes, batch, weights
 
     def sample_one_random(self):
@@ -240,8 +252,8 @@ class SILReplayMemory(object):
         assert self.priority
 
         sample = self.buff.sample_rand(1)
-        states, fullstates, acts, returns, from_rollout = sample
-        batch = (states, fullstates, acts, returns, from_rollout)
+        states, fullstates, acts, returns, from_rollout, refreshed = sample
+        batch = (states, fullstates, acts, returns, from_rollout, refreshed)
         return batch
 
     def set_weights(self, indexes, priors):

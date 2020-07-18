@@ -23,6 +23,10 @@ def main():
 
     parser.add_argument('--save-to', type=str, default='results/',
                         help='where to save results')
+    parser.add_argument('--checkpoint-buffer', action='store_true', help='save replay buffer')
+    parser.set_defaults(checkpoint_buffer=False)
+    parser.add_argument('--checkpoint-freq', type=int, default=1,
+                        help='checkpoint frequency, default to eval-freq*checkpoint-freq')
 
     parser.add_argument('--local-t-max', type=int, default=20,
                         help='repeat step size')

@@ -253,7 +253,9 @@ class GameACNetwork(ABC):
                             not_transfer_conv2=False, var_list=None):
         """Load model from pre-trained network."""
         assert folder is not None
+        print(folder)
         assert folder.is_dir()
+
         assert self._thread_index == -1  # only load model to global network
         # assert self._thread_index < 0  # only load model to global network
 
@@ -271,9 +273,9 @@ class GameACNetwork(ABC):
             folder /= 'nofc2'
         else:
             transfer_all = True
-            max_value_file = folder / "max_output_value"
-            with max_value_file.open('r') as f_max_value:
-                transfer_max_output_val = float(f_max_value.readline().split()[0])
+            # max_value_file = folder / "max_output_value"
+            # with max_value_file.open('r') as f_max_value:
+            #     transfer_max_output_val = float(f_max_value.readline().split()[0])
             folder /= 'all'
 
         saver_transfer_from = tf.train.Saver(var_list=var_list)

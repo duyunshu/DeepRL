@@ -21,8 +21,9 @@ class ReplayBuffer(object):
     def __len__(self):
         return len(self._storage)
 
-    def add(self, obs_t, fs, action, R, from_rollout=False):
-        data = (obs_t, fs, action, R, from_rollout)
+    def add(self, obs_t, fs, action, R, from_rollout=False, refreshed=False):
+        data = (obs_t, fs, action, R, from_rollout, refreshed)
+        data = list(data)
 
         if self._next_idx >= len(self._storage):
             self._storage.append(data)
@@ -32,17 +33,18 @@ class ReplayBuffer(object):
         self._next_idx = (self._next_idx + 1) % self._maxsize
 
     def _encode_sample(self, idxes):
-        obses_t, fss, actions, returns, from_rollout = [], [], [], [], []
+        obses_t, fss, actions, returns, from_rollout, refreshed = [], [], [], [], [], []
         for i in idxes:
             data = self._storage[i]
-            obs_t, fs, action, R, rollout = data
+            obs_t, fs, action, R, rollout, refresh = data
             obses_t.append(np.array(obs_t, copy=False))
             fss.append(np.array(fs, copy=False))
             actions.append(np.array(action, copy=False))
             returns.append(R)
             from_rollout.append(rollout)
+            refreshed.append(refresh)
         return np.array(obses_t), np.array(fss),np.array(actions), \
-                np.array(returns), np.array(from_rollout)
+                np.array(returns), np.array(from_rollout), np.array(refreshed)
 
     def sample(self, batch_size):
         """Sample a batch of experiences.
@@ -180,7 +182,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         """
         assert batch_size == 1
         idxes = random.randint(0, len(self._storage) - 1)
-        data = self._storage[idxes]
+        # change refreshed to True
+        self._storage[idxes][-1] = True
+        data = self._storage[idxes]       
         return data
 
     def update_priorities(self, idxes, priorities):

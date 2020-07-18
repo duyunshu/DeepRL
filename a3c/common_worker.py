@@ -192,6 +192,127 @@ class CommonWorker(object):
             worker.episode.reset()
         return (total_reward, total_steps, n_episodes)
 
+    def testing_ep(self, sess, max_steps, global_t, folder, demo_memory_cam=None,
+                worker=None):
+        """Evaluate A3C."""
+        assert worker is not None
+        assert not worker.is_classify_thread
+        assert not worker.is_rollout_thread
+        assert not worker.is_sil_thread
+
+        logger.info("Evaluate policy at global_t={}...".format(global_t))
+
+        # copy weights from shared to local
+        sess.run(worker.sync)
+
+        if demo_memory_cam is not None and global_t % 5000000 == 0:
+            worker.generate_cam_video(sess, 0.03, global_t, folder,
+                                    demo_memory_cam)
+
+        episode_buffer = []
+        worker.game_state.reset(hard_reset=True)
+        episode_buffer.append(worker.game_state.get_screen_rgb())
+
+        init_reward = -1000
+
+        total_reward = 0
+        total_steps = 0
+        episode_reward = 0
+        episode_steps = 0
+        n_episodes = 0
+        reward_list = []
+        while n_episodes < 5:
+            # worker.game_state.env.render()
+            state = cv2.resize(worker.game_state.s_t,
+                               worker.local_net.in_shape[:-1],
+                               interpolation=cv2.INTER_AREA)
+            pi_, value_, logits_ = worker.local_net.run_policy_and_value(
+                sess, state)
+
+            if False:
+                action = np.random.choice(range(worker.action_size), p=pi_)
+            else:
+                action = worker.pick_action(logits_)
+
+            # take action
+            worker.game_state.step(action)
+            terminal = worker.game_state.terminal
+
+            # if n_episodes == 0 and global_t % 5000000 == 0:
+            episode_buffer.append(worker.game_state.get_screen_rgb())
+
+            episode_reward += worker.game_state.reward
+            episode_steps += 1
+            max_steps -= 1
+
+            # s_t = s_t1
+            worker.game_state.update()
+
+            if terminal:
+                env = worker.game_state.env
+                name = 'EpisodicLifeEnv'
+                if get_wrapper_by_name(env, name).was_real_done:
+                    if episode_reward > init_reward:
+                        time_per_step = 0.0167
+                        images = np.array(episode_buffer)
+                        # file = 'frames/image{ep:010d}'.format(ep=global_t)
+                        file = 'frames/reward={}'.format(str(episode_reward))
+                        duration = len(images)*time_per_step
+                        make_movie(images, str(folder / file),
+                                   duration=duration, true_image=True,
+                                   salience=False)
+                        # episode_buffer = []
+                        init_reward = episode_reward
+                    episode_buffer = []
+                    n_episodes += 1
+                    score_str = colored("score={}".format(episode_reward),
+                                        "yellow")
+                    steps_str = colored("steps={}".format(episode_steps),
+                                        "cyan")
+                    log_data = (global_t, worker.thread_idx, self.thread_idx,
+                                n_episodes, score_str, steps_str,
+                                total_steps)
+                    logger.debug("test: global_t={} test_worker={} cur_worker={}"
+                                 " trial={} {} {}"
+                                 " total_steps={}".format(*log_data))
+                    total_reward += episode_reward
+                    reward_list.append(episode_reward)
+                    total_steps += episode_steps
+                    episode_reward = 0
+                    episode_steps = 0
+
+                worker.game_state.reset(hard_reset=False)
+
+        if n_episodes == 0:
+            total_reward = episode_reward
+            total_steps = episode_steps
+        else:
+            total_reward = total_reward / n_episodes
+            total_steps = total_steps // n_episodes
+
+        log_data = (global_t, worker.thread_idx, self.thread_idx,
+                    total_reward, total_steps,
+                    n_episodes)
+        logger.info("test: global_t={} test_worker={} cur_worker={}"
+                    " final score={} final steps={}"
+                    " # trials={}".format(*log_data))
+
+        worker.record_summary(
+            score=total_reward, steps=total_steps,
+            episodes=n_episodes, global_t=global_t, mode='A3C_Test')
+
+        # reset variables used in training
+        worker.episode_reward = 0
+        worker.episode_steps = 0
+        worker.game_state.reset(hard_reset=True)
+        worker.last_rho = 0.
+
+        if worker.use_sil:
+            # ensure no states left from a non-terminating episode
+            worker.episode.reset()
+        return (total_reward, total_steps, n_episodes, reward_list)
+
+
     def generate_cam(self, sess, test_cam_si, global_t, worker=None):
         """Compute Grad-CAM and generate video of Grad-CAM."""
         assert worker is not None
@@ -439,6 +560,7 @@ class CommonWorker(object):
         episode_reward = 0
         episode_steps = 0
         n_episodes = 0
+        reward_list = []
         while max_steps > 0:
             # worker.game_state.env.render()
             state = cv2.resize(worker.game_state.s_t,
@@ -476,6 +598,7 @@ class CommonWorker(object):
                                     "test_worker={} cur_worker={} total_steps={}"
                                     .format(*log_data))
                     total_reward += episode_reward
+                    reward_list.append(episode_reward)
                     total_steps += episode_steps
                     episode_reward = 0
                     episode_steps = 0
@@ -498,4 +621,4 @@ class CommonWorker(object):
             score=total_reward, steps=total_steps,
             episodes=n_episodes, global_t=global_t, mode='Classifier_Test')
 
-        return (total_reward, total_steps, n_episodes)
+        return (total_reward, total_steps, n_episodes, reward_list)

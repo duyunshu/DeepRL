@@ -4,7 +4,12 @@ import numpy as np
 
 from common.util import load_memory
 
-logger = logging.getLogger("a3c")
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+
+logger = logging.getLogger("setup_functions")
 
 def setup_folder(args, env_name):
     if not os.path.exists(args.save_to+"a3c/"):
@@ -60,6 +65,9 @@ def setup_folder(args, env_name):
             end_str+='_rollout'
             if args.one_buffer:
                 end_str+="_onebuffer"
+            if args.memory_length != 100000:
+                t="_"+str(args.memory_length / 100000)+"memlength"
+                end_str+=t
             if args.roll_any:
                 end_str+="_rollany"
             if args.add_all_rollout:
@@ -314,3 +322,46 @@ def initialize_uninitialized(tf, sess, model=None):
         [v for (v, f) in zip(global_vars, is_not_initialized) if not f]
     if len(not_initialized_vars):
         sess.run(tf.variables_initializer(not_initialized_vars))
+
+def restore_buffer(fn, buffer):
+    temp = pickle.load(fn.open('rb'))
+    x_states = []
+    x_fullstates = []
+    x_actions = []
+    x_returns = []
+    x_rollout = []
+    x_refresh = []
+    for data in temp:
+        s, fs, a, r, roll, refresh = data
+        x_states.append(s)
+        x_fullstates.append(fs)
+        x_actions.append(a)
+        x_returns.append(r)
+        x_rollout.append(roll)
+        x_refresh.append(refresh)
+    if len(x_fullstates) > 0:
+        buffer.extend_one_priority(x_states, x_fullstates, x_actions,
+                                   x_returns, x_rollout, x_refresh)
+    del temp
+    return buffer
+
+def restore_buffer_trees(fn, buffer):
+    temp = pickle.load(fn.open('rb'))
+    assert len(temp) == 2
+    buffer.buff._it_sum._value = temp[0]
+    buffer.buff._it_min._value = temp[1]
+    del temp
+    return buffer
+
+def restore_buffer_params(fn, buffer):
+    temp = pickle.load(fn.open('rb'))
+    assert len(temp) == 2
+    buffer.buff._next_idx = temp[0]
+    buffer.buff._max_priority = temp[1]
+    del temp
+    return buffer
+
+def dump_pickle(dict_list, fn_list):
+    assert len(dict_list) == len(fn_list)
+    for i in range(len(dict_list)):
+        pickle.dump(dict_list[i], fn_list[i].open('wb'), pickle.HIGHEST_PROTOCOL)

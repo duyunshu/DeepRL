@@ -147,6 +147,9 @@ class A3CTrainingThread(CommonWorker):
         values = []
         rho = []
 
+        local_a3c_ctr = 0
+        local_a3c_sample_used = 0
+
         terminal_pseudo = False  # loss of life
         terminal_end = False  # real terminal
 
@@ -286,6 +289,9 @@ class A3CTrainingThread(CommonWorker):
 
         sess.run(self.apply_gradients, feed_dict=feed_dict)
 
+        local_a3c_ctr += 1
+        local_a3c_sample_used += len(batch_action)
+
         t = self.local_t - self.prev_local_t
         if (self.thread_idx == self.log_idx and t >= self.perf_log_interval):
             self.prev_local_t += self.perf_log_interval
@@ -300,4 +306,5 @@ class A3CTrainingThread(CommonWorker):
 
         # return advanced local step size
         diff_local_t = self.local_t - start_local_t
-        return diff_local_t, terminal_end, terminal_pseudo
+        return diff_local_t, terminal_end, terminal_pseudo, \
+               local_a3c_ctr, local_a3c_sample_used

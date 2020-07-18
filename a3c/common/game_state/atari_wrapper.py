@@ -32,6 +32,7 @@ class AtariWrapper(gym.Wrapper):
         # self.unwrapped.ale.setInt('frame_skip'.encode('utf-8'), self.unwrapped.frameskip)
         # self.unwrapped.seed()
 
+        logger.info("Game: {}".format(self.env.spec.id))
         logger.info("ALE lives: {}".format(self.unwrapped.ale.lives()))
         #logger.info("frameskip: {} / {}".format(self.unwrapped.ale.getInt('frame_skip'.encode('utf-8')), self.unwrapped.frameskip))
         logger.info("ALE frameskip: {} / {}".format(self.unwrapped.ale.getInt('frame_skip'.encode('utf-8')), self.unwrapped.frameskip))

@@ -28,6 +28,10 @@ class GameState(object):
         env = gym.make(self.env_id)
         assert "NoFrameskip" in env.spec.id
 
+        # if "MontezumaRevenge" in env.spec.id:
+        #     env.spec.max_episode_steps = 1 #100000*10
+        # print(env.spec.max_episode_steps)
+
         skip = 3 if "SpaceInvaders" in env.spec.id else 4
 
         # necessary for faster simulation
