@@ -67,7 +67,8 @@ class GameState(object):
     def step(self, action):
         if self.display:
             self.env.render(mode='human' if self.human_demo else '')
-
+        print(action)
+        int(input())
         obs, reward, terminal, env_info = self.env.step(action)
 
         self.loss_life = False
@@ -76,14 +77,21 @@ class GameState(object):
             self.gain_life = True
         elif (self.lives - env_info['ale.lives']) != 0:
             self.loss_life = True
-        self.x_t1 = obs
-        self.full_state1 = self.env.unwrapped.clone_full_state()
+        self.x_t1 = obs # next state
+        self.full_state1 = self.env.unwrapped.clone_full_state() # next fullstate
 
         self.reward = reward
         self.terminal = terminal
         self.lives = env_info['ale.lives']
         x_t = np.reshape(obs, (84, 84, 1))
-        self.s_t1 = np.append(self.s_t[:,:,1:], x_t, axis=2)
+        self.s_t1 = np.append(self.s_t[:,:,1:], x_t, axis=2) # next stacked state
+        print(self.s_t1)
+        int(input())
+        print(self.reward)
+        int(input())
+        print(self.terminal)
+        int(input())
+        return self.s_t1, self.reward, self.terminal
 
     def update(self):
         self.prev_x_t = self.x_t

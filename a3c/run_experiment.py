@@ -184,7 +184,7 @@ def main():
                         help='SIL batch size')
     parser.add_argument('--priority-memory', action='store_true',
                         help='Use Prioritized Replay Memory')
-    parser.set_defaults(priority_mem=False)
+    parser.set_defaults(priority_memory=False)
     parser.add_argument('--memory-length', type=int, default=100000,
                         help='SIL memory size')
 
