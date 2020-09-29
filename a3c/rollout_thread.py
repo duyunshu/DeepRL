@@ -202,8 +202,10 @@ class RolloutThread(CommonWorker):
 
         sess.run(self.apply_gradients, feed_dict=feed_dict)
 
+        return batch_adv
+
     def rollout(self, a3c_sess, folder, pretrain_sess, game, global_t, badstate,
-                rollout_ctr, rollout_added_ctr, rollout_sample_used,
+                rollout_ctr, rollout_added_ctr, rollout_sample_used, rollout_sample_used_adv,
                 rollout_new_return, rollout_old_return,
                 add_all_rollout, ep_max_steps, nstep_bc, update_in_rollout):
         """Rollout, one at a time."""
@@ -259,13 +261,13 @@ class RolloutThread(CommonWorker):
             if nstep_bc > 0:
                 # print("taking action from BC, {} steps left".format(nstep_bc))
                 model_pi = self.local_pretrained.run_policy(pretrain_sess, state)
-                if game == "Breakout": # breakout needs some stocasity
-                    action = self.egreedy_action(model_pi, epsilon=0.01)
-                    confidences.append(model_pi[action])
-                else:
-                    action, confidence = self.choose_action_with_high_confidence(
-                                              model_pi, exclude_noop=False)
-                    confidences.append(confidence)
+                # if game == "Breakout": # breakout needs some stocasity
+                #     action = self.egreedy_action(model_pi, epsilon=0.01)
+                #     confidences.append(model_pi[action])
+                # else:
+                action, confidence = self.choose_action_with_high_confidence(
+                                          model_pi, exclude_noop=False)
+                confidences.append(confidence)
                 nstep_bc -= 1
             else:
                 # print("taking action from A3C")
@@ -344,8 +346,9 @@ class RolloutThread(CommonWorker):
                     # update policy immediate using a good rollout
                     if update_in_rollout:
                         logger.info("Update A3C using rollout data")
-                        self.update_a3c(a3c_sess, actions, states, rewards, values, global_t)
+                        batch_adv = self.update_a3c(a3c_sess, actions, states, rewards, values, global_t)
                         rollout_sample_used += len(actions)
+                        rollout_sample_used_adv += np.sum(batch_adv)
 
                 # if add and old_a != actions[-1]:
                 #     # save the img of the rollout state, check old_action vs. new_action
@@ -381,5 +384,5 @@ class RolloutThread(CommonWorker):
         diff_local_t = self.local_t - start_local_t
 
         return diff_local_t, terminal_end, terminal_pseudo, rollout_ctr, \
-               rollout_added_ctr, add, rollout_sample_used, \
+               rollout_added_ctr, add, rollout_sample_used, rollout_sample_used_adv,\
                rollout_new_return, rollout_old_return

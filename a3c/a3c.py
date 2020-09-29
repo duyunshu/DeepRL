@@ -86,40 +86,54 @@ def run_a3c(args):
     global_t = 0
     rewards = {'train': {}, 'eval': {}}
     best_model_reward = -(sys.maxsize)
-
-    class_best_model_reward = -(sys.maxsize)
-    class_rewards = {'class_eval': {}}
+    if args.load_pretrained_model:
+        class_best_model_reward = -(sys.maxsize)
+        class_rewards = {'class_eval': {}}
 
     sil_dict = {"sil_ctr":{}, # total number of SIL updates
                 "sil_a3c_sampled":{}, # total number of a3c experience sampled during SIL
                 "sil_a3c_used":{}, # total number of a3c experience used during SIL (i.e., pass max op)
+                "sil_a3c_sampled_return":{},# the average return of sampled experiences from buffer D
+                "sil_a3c_used_return":{}, # the average return of used experiences for butter D
+                "sil_a3c_used_adv":{}, # the average advantage of used experiences for butter D (should always be pos)
                 "sil_rollout_sampled":{}, # total number of rollout experience sampled during SIL
                 "sil_rollout_used":{}, # total number of rollout experience used during SIL (i.e., pass max op)
+                "sil_rollout_sampled_return":{}, # the average return of sampled experiences from buffer D
+                "sil_rollout_used_return":{}, # the average return of sampled experiences from buffer R
+                "sil_rollout_used_adv":{}, # the average advantage of used experiences for butter R (should always be pos)
                 "sil_old_sampled":{}, # total number of older experience sampled; once an experience is refreshed, its older ver should never be used again)
                 "sil_old_used":{}} # total number of older exprience used (i.e., pass max op)
-    sil_ctr, sil_a3c_sampled, sil_a3c_used, sil_rollout_sampled = 0, 0, 0, 0
-    sil_rollout_used, sil_old_sampled, sil_old_used = 0, 0, 0
+    sil_ctr, sil_a3c_sampled, sil_a3c_used, sil_a3c_sampled_return, sil_a3c_used_return = 0, 0, 0, 0, 0
+    sil_a3c_used_adv = 0
+    sil_rollout_sampled, sil_rollout_used, sil_rollout_sampled_return, sil_rollout_used_return = 0, 0, 0, 0
+    sil_rollout_used_adv = 0
+    sil_old_sampled, sil_old_used = 0, 0
 
     rollout_dict = {"rollout_ctr": {}, # total number of rollout performed (i.e., refresh freq)
                     "rollout_added_ctr":{}, # total number of successful rollout (i.e., freq of Gnew > G, also is number of rollout updates)
                     "rollout_steps": {}, # total number of rollout steps (50M - rollout_steps = a3c_steps)
                     "rollout_sample_used":{}, # total number of sample used for rollout update (each traj is of diff length, what's the avg)
+                    "rollout_sample_used_adv":{}, # the advantage of samples used for rollout update (each traj is of diff length, what's the avg)
                     "rollout_new_return":{}, # avg new return value for rollout (show if addall, this will be lower)
                     "rollout_old_return":{}} # avg old return value (show old_return is lower than new_return)
     rollout_ctr, rollout_added_ctr, rollout_sample_used, rollout_steps = 0, 0, 0, 0
+    rollout_sample_used_adv = 0
     rollout_new_return = 0 # this records the total, avg = this / rollout_added_ctr
     rollout_old_return = 0 # this records the total, avg = this / rollout_added_ctr
 
     a3c_dict = {"a3c_ctr":{}, # total number of A3C updates
-                "a3c_sample_used":{}} # total number of samples used for A3C updates (each traj is diff length)
-    a3c_ctr, a3c_sample_used = 0, 0
+                "a3c_sample_used":{},# total number of samples used for A3C updates (each traj is diff length)
+                "a3c_sample_used_return":{},# the return of samples used for A3C updates, compare with the returns in SIL
+                "a3c_sample_used_adv":{}} # the advantage of samples used for A3C updates, compare with the returns in SIL
+    a3c_ctr, a3c_sample_used, a3c_sample_used_return, a3c_sample_used_adv = 0, 0, 0, 0
 
     # set up file names
     reward_fname = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)
     sil_fname = folder / '{}-a3c-dict-sil.pkl'.format(GYM_ENV_NAME)
     rollout_fname = folder / '{}-a3c-dict-rollout.pkl'.format(GYM_ENV_NAME)
     a3c_fname = folder / '{}-a3c-dict-a3c.pkl'.format(GYM_ENV_NAME)
-    # class_reward_fname = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
+    if args.load_pretrained_model:
+        class_reward_fname = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
 
     sharedmem_fname = folder / '{}-sharedmem.pkl'.format(GYM_ENV_NAME)
     sharedmem_params_fname = folder / '{}-sharedmem-params.pkl'.format(GYM_ENV_NAME)
@@ -504,8 +518,14 @@ def run_a3c(args):
         sil_ctr = sil_dict['sil_ctr'][tmp_t]
         sil_a3c_sampled = sil_dict['sil_a3c_sampled'][tmp_t]
         sil_a3c_used = sil_dict['sil_a3c_used'][tmp_t]
+        sil_a3c_sampled_return = sil_dict['sil_a3c_sampled_return'][tmp_t]
+        sil_a3c_used_return = sil_dict['sil_a3c_used_return'][tmp_t]
+        sil_a3c_used_adv = sil_dict['sil_a3c_used_adv'][tmp_t]
         sil_rollout_sampled = sil_dict['sil_rollout_sampled'][tmp_t]
         sil_rollout_used = sil_dict['sil_rollout_used'][tmp_t]
+        sil_rollout_sampled_return = sil_dict['sil_rollout_sampled_return'][tmp_t]
+        sil_rollout_used_return = sil_dict['sil_rollout_used_return'][tmp_t]
+        sil_rollout_used_adv = sil_dict['sil_rollout_used_adv'][tmp_t]
         sil_old_sampled = sil_dict['sil_old_sampled'][tmp_t]
         sil_old_used = sil_dict['sil_old_used'][tmp_t]
         logger.info(">>> restored: sil_dict")
@@ -513,19 +533,23 @@ def run_a3c(args):
         rollout_dict = pickle.load(rollout_fname.open('rb'))
         rollout_ctr = rollout_dict['rollout_ctr'][tmp_t]
         rollout_added_ctr = rollout_dict['rollout_added_ctr'][tmp_t]
-        rollout_sample_used = rollout_dict['rollout_sample_used'][tmp_t]
-        rollout_new_return = rollout_dict['rollout_new_return'][tmp_t] * rollout_added_ctr
-        rollout_old_return = rollout_dict['rollout_old_return'][tmp_t] * rollout_added_ctr
         rollout_steps = rollout_dict['rollout_steps'][tmp_t]
+        rollout_sample_used = rollout_dict['rollout_sample_used'][tmp_t]
+        rollout_sample_used_adv = rollout_dict['rollout_sample_used_adv'][tmp_t]
+        rollout_new_return = rollout_dict['rollout_new_return'][tmp_t]
+        rollout_old_return = rollout_dict['rollout_old_return'][tmp_t]
         logger.info(">>> restored: rollout_dict")
 
         a3c_dict = pickle.load(a3c_fname.open('rb'))
         a3c_ctr = a3c_dict['a3c_ctr'][tmp_t]
         a3c_sample_used = a3c_dict['a3c_sample_used'][tmp_t]
+        a3c_sample_used_return = a3c_dict['a3c_sample_used_return'][tmp_t]
+        a3c_sample_used_adv = a3c_dict['a3c_sample_used_adv'][tmp_t]
         logger.info(">>> restored: a3c_dict")
 
-        # class_reward_file = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
-        # class_rewards = pickle.load(class_reward_file.open('rb'))
+        if args.load_pretrained_model:
+            class_reward_file = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
+            class_rewards = pickle.load(class_reward_file.open('rb'))
 
         # set up replay buffers
         if args.checkpoint_buffer:
@@ -576,10 +600,14 @@ def run_a3c(args):
         nonlocal shared_memory, exp_buffer, rollout_buffer
         nonlocal _rollout_proportion, _stop_rollout, last_reward, class_last_reward
         nonlocal sil_dict, sil_ctr, sil_a3c_sampled, sil_a3c_used, \
-                 sil_rollout_sampled, sil_rollout_used, sil_old_sampled, sil_old_used
-        nonlocal rollout_dict, rollout_ctr, rollout_added_ctr, rollout_sample_used, \
+                 sil_a3c_sampled_return, sil_a3c_used_return, sil_a3c_used_adv,\
+                 sil_rollout_sampled, sil_rollout_used, \
+                 sil_rollout_sampled_return, sil_rollout_used_return, sil_rollout_used_adv,\
+                 sil_old_sampled, sil_old_used
+        nonlocal rollout_dict, rollout_ctr, rollout_added_ctr, rollout_sample_used,\
+                 rollout_sample_used_adv,\
                  rollout_new_return, rollout_old_return, rollout_steps
-        nonlocal a3c_dict, a3c_ctr, a3c_sample_used
+        nonlocal a3c_dict, a3c_ctr, a3c_sample_used, a3c_sample_used_return, a3c_sample_used_adv
         # ispretrain_markers, # last_temp_global_t,\
 
         parallel_worker = all_workers[parallel_idx]
@@ -627,10 +655,41 @@ def run_a3c(args):
                 saver.save(sess, str(checkpt_file), global_step=global_t)
                 save_best_model(rewards['eval'][global_t][0])
 
+                # saving worker info to dicts
+                # SIL
+                sil_dict['sil_ctr'][step_t] = sil_ctr
+                sil_dict['sil_a3c_sampled'][step_t] = sil_a3c_sampled
+                sil_dict['sil_a3c_used'][step_t] = sil_a3c_used
+                sil_dict['sil_a3c_sampled_return'][step_t] = sil_a3c_sampled_return
+                sil_dict['sil_a3c_used_return'][step_t] = sil_a3c_used_return
+                sil_dict['sil_a3c_used_adv'][step_t] = sil_a3c_used_adv
+                sil_dict['sil_rollout_sampled'][step_t] = sil_rollout_sampled
+                sil_dict['sil_rollout_used'][step_t] = sil_rollout_used
+                sil_dict['sil_rollout_sampled_return'][step_t] = sil_rollout_sampled_return
+                sil_dict['sil_rollout_used_return'][step_t] = sil_rollout_used_return
+                sil_dict['sil_rollout_used_adv'][step_t] = sil_rollout_used_adv
+                sil_dict['sil_old_sampled'][step_t] = sil_old_sampled
+                sil_dict['sil_old_used'][step_t] = sil_old_used
+                # ROLLOUT
+                rollout_dict['rollout_ctr'][step_t] = rollout_ctr
+                rollout_dict['rollout_added_ctr'][step_t] = rollout_added_ctr
+                rollout_dict['rollout_steps'][step_t] = rollout_steps
+                rollout_dict['rollout_sample_used'][step_t] = rollout_sample_used
+                rollout_dict['rollout_sample_used_adv'][step_t] = rollout_sample_used_adv
+                rollout_dict['rollout_new_return'][step_t] = rollout_new_return
+                rollout_dict['rollout_old_return'][step_t] = rollout_old_return
+                # A3C
+                a3c_dict['a3c_ctr'][step_t] = a3c_ctr
+                a3c_dict['a3c_sample_used'][step_t] = a3c_sample_used
+                a3c_dict['a3c_sample_used_return'][step_t] = a3c_sample_used_return
+                a3c_dict['a3c_sample_used_adv'][step_t] = a3c_sample_used_adv
+
                 # dump pickle
                 # not saving class_reward
                 dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
                             [reward_fname, sil_fname, rollout_fname, a3c_fname])
+                if args.load_pretrained_model:
+                    dump_pickle([class_rewards], [class_reward_fname])
 
                 logger.info('Dump pickle at step {}'.format(global_t))
 
@@ -737,9 +796,13 @@ def run_a3c(args):
                         _stop_rollout = True
 
                     train_out = parallel_worker.sil_train(
-                        sess, global_t, shared_memory, m_repeat,
-                        sil_ctr, sil_a3c_sampled, sil_a3c_used,
+                        sess, global_t, shared_memory, m_repeat, sil_ctr,
+                        sil_a3c_sampled, sil_a3c_used,
+                        sil_a3c_sampled_return, sil_a3c_used_return,
+                        sil_a3c_used_adv,
                         sil_rollout_sampled, sil_rollout_used,
+                        sil_rollout_sampled_return, sil_rollout_used_return,
+                        sil_rollout_used_adv,
                         sil_old_sampled, sil_old_used,
                         rollout_buffer=rollout_buffer,
                         rollout_proportion=_rollout_proportion,
@@ -747,8 +810,10 @@ def run_a3c(args):
                         roll_any=args.roll_any)
 
                     sil_ctr, sil_a3c_sampled, sil_a3c_used, \
-                    sil_rollout_sampled, sil_rollout_used, sil_old_sampled, \
-                    sil_old_used, goodstate, badstate = train_out
+                    sil_a3c_sampled_return, sil_a3c_used_return, sil_a3c_used_adv,\
+                    sil_rollout_sampled, sil_rollout_used, \
+                    sil_rollout_sampled_return, sil_rollout_used_return, sil_rollout_used_adv,\
+                    sil_old_sampled, sil_old_used, goodstate, badstate = train_out
 
                     th_ctr.put(1)
 
@@ -781,8 +846,10 @@ def run_a3c(args):
                         parallel_worker.record_sil(sil_ctr=sil_ctr,
                                               total_used=(sil_a3c_used + sil_rollout_used),
                                               num_a3c_used=sil_a3c_used,
+                                              a3c_used_return=sil_a3c_used_return/sil_a3c_used,
                                               rollout_sampled=sil_rollout_sampled,
                                               rollout_used=sil_rollout_used,
+                                              rollout_used_return=sil_rollout_used_return/(sil_rollout_used+1),
                                               old_sampled=sil_old_sampled,
                                               old_used=sil_old_used,
                                               goods=goodstate_queue.qsize(),
@@ -798,8 +865,12 @@ def run_a3c(args):
                                         sil_a3c_used+sil_rollout_used,
                                         args.batch_size*sil_ctr,
                                         sil_a3c_used,
+                                        sil_a3c_used_return/(sil_a3c_used+1),
+                                        sil_a3c_used_adv/(sil_a3c_used+1),
                                         sil_rollout_sampled,
                                         sil_rollout_used,
+                                        sil_rollout_used_return/(sil_rollout_used+1),
+                                        sil_rollout_used_adv/(sil_rollout_used+1),
                                         sil_old_sampled,
                                         sil_old_used,
                                         goodstate_queue.qsize(),
@@ -809,12 +880,16 @@ def run_a3c(args):
                                         " rollout_buffer_size={2:}"
                                         " total_sample_used={3:}/{4:}"
                                         " a3c_used={5:}"
-                                        " rollout_sampled={6:}"
-                                        " rollout_used={7:}"
-                                        " old_sampled={8:}"
-                                        " old_used={9:}"
-                                        " #good_states={10:}"
-                                        " #bad_states={11:}".format(*log_data))
+                                        " a3c_used_return_avg={6:.2f}"
+                                        " a3c_used_adv_avg={7:.2f}"
+                                        " rollout_sampled={8:}"
+                                        " rollout_used={9:}"
+                                        " rollout_used_return_avg={10:.2f}"
+                                        " rollout_used_adv_avg={11:.2f}"
+                                        " old_sampled={12:}"
+                                        " old_used={13:}"
+                                        " #good_states={14:}"
+                                        " #bad_states={15:}".format(*log_data))
                     else:
                         parallel_worker.record_sil(sil_ctr=sil_ctr,
                                                    total_used=(sil_a3c_used + sil_rollout_used),
@@ -858,6 +933,8 @@ def run_a3c(args):
                 # for centralized A3C counting
                 local_a3c_ctr = 0
                 local_a3c_sample_used = 0
+                local_a3c_sample_used_return = 0
+                local_a3c_sample_used_adv = 0
 
             elif parallel_worker.is_rollout_thread:
                 th_ctr.get()
@@ -878,6 +955,7 @@ def run_a3c(args):
                                                    GAME_NAME, global_t, sample,
                                                    rollout_ctr, rollout_added_ctr,
                                                    rollout_sample_used,
+                                                   rollout_sample_used_adv,
                                                    rollout_new_return,
                                                    rollout_old_return,
                                                    args.add_all_rollout,
@@ -886,7 +964,7 @@ def run_a3c(args):
                                                    args.update_in_rollout)
 
                     diff_global_t, episode_end, part_end, rollout_ctr, \
-                        rollout_added_ctr, add, rollout_sample_used, \
+                        rollout_added_ctr, add, rollout_sample_used, rollout_sample_used_adv, \
                         rollout_new_return, rollout_old_return= train_out
 
                     rollout_steps += diff_global_t
@@ -908,6 +986,8 @@ def run_a3c(args):
                 # for centralized A3C counting
                 local_a3c_ctr = 0
                 local_a3c_sample_used = 0
+                local_a3c_sample_used_return = 0
+                local_a3c_sample_used_adv = 0
 
                 th_ctr.put(1)
 
@@ -955,7 +1035,8 @@ def run_a3c(args):
 
                 train_out = parallel_worker.train(sess, global_t, rewards)
                 diff_global_t, episode_end, part_end, \
-                    local_a3c_ctr, local_a3c_sample_used = train_out
+                    local_a3c_ctr, local_a3c_sample_used, \
+                    local_a3c_sample_used_return, local_a3c_sample_used_adv = train_out
 
                 th_ctr.put(1)
 
@@ -972,10 +1053,15 @@ def run_a3c(args):
                 # increase count for A3C (TODO: centralize this for SIL and Rollout)
                 a3c_ctr += local_a3c_ctr
                 a3c_sample_used += local_a3c_sample_used
-
+                a3c_sample_used_return += local_a3c_sample_used_return
+                a3c_sample_used_adv += local_a3c_sample_used_adv
 
                 # if during a thread's update, global_t has reached a evaluation interval
                 if global_t > next_global_t:
+
+                    logger.info("A3C episode return avg: {:.2f}".format(a3c_sample_used_return/a3c_sample_used))
+                    logger.info("A3C episode adv avg: {:.2f}".format(a3c_sample_used_adv/a3c_sample_used))
+
                     next_global_t = next_t(global_t, args.eval_freq)
                     step_t = int(next_global_t - args.eval_freq)
 
@@ -1000,24 +1086,29 @@ def run_a3c(args):
                     sil_dict['sil_ctr'][step_t] = sil_ctr
                     sil_dict['sil_a3c_sampled'][step_t] = sil_a3c_sampled
                     sil_dict['sil_a3c_used'][step_t] = sil_a3c_used
+                    sil_dict['sil_a3c_sampled_return'][step_t] = sil_a3c_sampled_return
+                    sil_dict['sil_a3c_used_return'][step_t] = sil_a3c_used_return
+                    sil_dict['sil_a3c_used_adv'][step_t] = sil_a3c_used_adv
                     sil_dict['sil_rollout_sampled'][step_t] = sil_rollout_sampled
                     sil_dict['sil_rollout_used'][step_t] = sil_rollout_used
+                    sil_dict['sil_rollout_sampled_return'][step_t] = sil_rollout_sampled_return
+                    sil_dict['sil_rollout_used_return'][step_t] = sil_rollout_used_return
+                    sil_dict['sil_rollout_used_adv'][step_t] = sil_rollout_used_adv
                     sil_dict['sil_old_sampled'][step_t] = sil_old_sampled
                     sil_dict['sil_old_used'][step_t] = sil_old_used
                     # ROLLOUT
                     rollout_dict['rollout_ctr'][step_t] = rollout_ctr
                     rollout_dict['rollout_added_ctr'][step_t] = rollout_added_ctr
-                    rollout_dict['rollout_sample_used'][step_t] = rollout_sample_used
                     rollout_dict['rollout_steps'][step_t] = rollout_steps
-                    if rollout_added_ctr > 0:
-                        rollout_dict['rollout_new_return'][step_t] = rollout_new_return / rollout_added_ctr
-                        rollout_dict['rollout_old_return'][step_t] = rollout_old_return / rollout_added_ctr
-                    else:
-                        rollout_dict['rollout_new_return'][step_t] = rollout_new_return
-                        rollout_dict['rollout_old_return'][step_t] = rollout_old_return
+                    rollout_dict['rollout_sample_used'][step_t] = rollout_sample_used
+                    rollout_dict['rollout_sample_used_adv'][step_t] = rollout_sample_used_adv
+                    rollout_dict['rollout_new_return'][step_t] = rollout_new_return
+                    rollout_dict['rollout_old_return'][step_t] = rollout_old_return
                     # A3C
                     a3c_dict['a3c_ctr'][step_t] = a3c_ctr
                     a3c_dict['a3c_sample_used'][step_t] = a3c_sample_used
+                    a3c_dict['a3c_sample_used_return'][step_t] = a3c_sample_used_return
+                    a3c_dict['a3c_sample_used_adv'][step_t] = a3c_sample_used_adv
 
                     # testing classifier in game (retrain classifier)
                     if args.train_classifier:
@@ -1051,9 +1142,10 @@ def run_a3c(args):
                             write_meta_graph=False)
 
                     # dump pickle
-                    # not saving class_reward
                     dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
                                 [reward_fname, sil_fname, rollout_fname, a3c_fname])
+                    if args.load_pretrained_model:
+                        dump_pickle([class_rewards], [class_reward_fname])
 
                     logger.info('Dump pickle at step {}'.format(global_t))
 

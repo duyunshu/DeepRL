@@ -149,6 +149,8 @@ class A3CTrainingThread(CommonWorker):
 
         local_a3c_ctr = 0
         local_a3c_sample_used = 0
+        local_a3c_sample_used_return = 0
+        local_a3c_sample_used_adv = 0
 
         terminal_pseudo = False  # loss of life
         terminal_end = False  # real terminal
@@ -291,6 +293,8 @@ class A3CTrainingThread(CommonWorker):
 
         local_a3c_ctr += 1
         local_a3c_sample_used += len(batch_action)
+        local_a3c_sample_used_return += np.sum(batch_cumsum_reward)
+        local_a3c_sample_used_adv += np.sum(batch_adv)
 
         t = self.local_t - self.prev_local_t
         if (self.thread_idx == self.log_idx and t >= self.perf_log_interval):
@@ -300,11 +304,12 @@ class A3CTrainingThread(CommonWorker):
             logger.info("worker-{}, log_worker-{}".format(self.thread_idx,
                                                           self.log_idx))
             logger.info("Performance : {} STEPS in {:.0f} sec. {:.0f}"
-                        " STEPS/sec. {:.2f}M STEPS/hour".format(
+                        " STEPS/sec. {:.2f}M STEPS/hour.".format(
                             global_t,  elapsed_time, steps_per_sec,
                             steps_per_sec * 3600 / 1000000.))
 
         # return advanced local step size
         diff_local_t = self.local_t - start_local_t
         return diff_local_t, terminal_end, terminal_pseudo, \
-               local_a3c_ctr, local_a3c_sample_used
+               local_a3c_ctr, local_a3c_sample_used, \
+               local_a3c_sample_used_return, local_a3c_sample_used_adv
