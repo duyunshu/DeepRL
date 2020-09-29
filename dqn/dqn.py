@@ -3,8 +3,12 @@ import numpy as np
 import logging
 import os
 
-from common.replay_memory import ReplayMemory
+# from common.replay_memory import ReplayMemory
+from common.replay_memory.priority_memory import ReplayBuffer, PrioritizedReplayBuffer
 from common.game_state import GameState
+from common.util.schedules import LinearSchedule
+from setup_functions import *
+from rollout_thread import RolloutThread
 
 logger = logging.getLogger("dqn")
 
@@ -28,70 +32,29 @@ def run_dqn(args):
     from dqn_net import DqnNet
     from dqn_net_class import DqnNetClass
     from dqn_training import DQNTraining
-    if args.cpu_only:
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    else:
-        if args.cuda_devices != '':
-            os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda_devices
+
+    # setup folder
+    GYM_ENV_NAME = args.gym_env.replace('-', '_')
+    folder = setup_folder(args, GYM_ENV_NAME)
+
+    # setup GPU options
+    device = "/cpu:0"
+    device_gpu = "/gpu:0"
     import tensorflow as tf
-
-    if not os.path.exists('results/dqn'):
-        os.makedirs('results/dqn')
-
-    if args.folder is not None:
-        folder = 'results/dqn/{}_{}'.format(args.gym_env.replace('-', '_'), args.folder)
-    else:
-        folder = 'results/dqn/{}_{}'.format(args.gym_env.replace('-', '_'), args.optimizer.lower())
-        end_str = ''
-
-        if args.unclipped_reward:
-            end_str += '_rawreward'
-        elif args.log_scale_reward:
-            end_str += '_logreward'
-        if args.transformed_bellman:
-            end_str += '_transformedbell'
-        if args.target_consistency:
-            end_str += '_tcloss'
-
-        if args.use_transfer:
-            end_str += '_transfer'
-            if args.not_transfer_conv2:
-                end_str += '_noconv2'
-            elif args.not_transfer_conv3 and args.use_mnih_2015:
-                end_str += '_noconv3'
-            elif args.not_transfer_fc1:
-                end_str += '_nofc1'
-            elif args.not_transfer_fc2:
-                end_str += '_nofc2'
-
-        if args.observe == 0:
-            end_str += '_obs0'
-        if args.init_epsilon < 1.0:
-            end_str += '_lowinitexp'
-        if args.use_human_model_as_advice:
-            end_str += '_modelasadvice'
-
-        if args.weight_decay is not None:
-            end_str += '_wdecay'
-
-        folder += end_str
-
-    if args.append_experiment_num is not None:
-        folder += '_' + args.append_experiment_num
-
-    if args.cpu_only:
-        device = '/cpu:0'
-        gpu_options = None
-    else:
-        device = '/gpu:'+os.environ["CUDA_VISIBLE_DEVICES"]
-        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.gpu_fraction)
+    gpu_options = setup_gpu(tf, args.cpu_only, args.gpu_fraction)
 
     config = tf.ConfigProto(
         gpu_options=gpu_options,
-        allow_soft_placement=True,
-        log_device_placement=False)
+        log_device_placement=False,
+        allow_soft_placement=True)
 
-    game_state = GameState(env_id=args.gym_env, display=False, no_op_max=30, human_demo=False, episode_life=True)
+    game_state = GameState(env_id=args.gym_env, display=False, no_op_max=30,
+                           human_demo=False, episode_life=True)
+    n_actions = game_state.env.action_space.n
+
+    eval_game_state = GameState(env_id=args.gym_env, display=False,
+                                no_op_max=30, human_demo=False, episode_life=True)
+
     human_net = None
     sess_human = None
     if args.use_human_model_as_advice:
@@ -104,7 +67,8 @@ def run_dqn(args):
             args.resized_height, args.resized_width,
             args.phi_len, game_state.env.action_space.n, args.gym_env,
             optimizer="Adam", learning_rate=0.0001, epsilon=0.001,
-            decay=0., momentum=0., folder=advice_folder, device='/cpu:0')
+            decay=0., momentum=0., folder=advice_folder,
+            device=device if args.cpu_only else device_gpu)
         sess_human = tf.Session(config=config, graph=human_net.graph)
         human_net.initializer(sess_human)
         human_net.load()
@@ -112,30 +76,73 @@ def run_dqn(args):
     # prepare session
     sess = tf.Session(config=config)
 
-    replay_memory = ReplayMemory(
-        args.resized_width, args.resized_height,
-        np.random.RandomState(),
-        max_steps=args.replay_memory,
-        phi_length=args.phi_len,
-        num_actions=game_state.env.action_space.n,
-        wrap_memory=True,
-        full_state_size=game_state.clone_full_state().shape[0])
+    replay_buffer = None
+    prioritized_replay_beta_iters = None
+    prioritized_replay_eps = None
+    beta_schedule = None
+    if args.priority_memory:
+        replay_buffer = PrioritizedReplayBuffer(size=args.memory_length,
+                                                alpha=args.prio_alpha)
+        if prioritized_replay_beta_iters is None:
+            prioritized_replay_beta_iters = 50*10**6 #args.train_max_steps
+        beta_schedule = LinearSchedule(prioritized_replay_beta_iters,
+                                       initial_p=args.prio_init_beta,
+                                       final_p=1.0)
+        prioritized_replay_eps = 1e-6 #TODO: add to parameter list
+    else:
+        replay_buffer = ReplayBuffer(size=args.memory_length)
+        beta_schedule=None
+        prioritized_replay_eps=0
+
+
+    sil_buffer = None
+    if args.use_sil:
+        if args.sil_priority_memory:
+            sil_buffer = PrioritizedReplayBuffer(size=args.memory_length,
+                                                 alpha=0.6)
+            assert prioritized_replay_eps is not None
+        else:
+            sil_buffer = ReplayBuffer(size=args.memory_length)
+            beta_schedule=None
+            prioritized_replay_eps=0
+
+
+    rollout_buffer = None
+    temp_buffer = None
+    if args.use_rollout:
+        if args.priority_memory:
+            rollout_buffer = PrioritizedReplayBuffer(size=args.memory_length,
+                                                     alpha=0.6)
+            temp_buffer = PrioritizedReplayBuffer(size=2*args.batch,
+                                                  alpha=0.6)
+            # these should have been set in priori_mem already
+            assert prioritized_replay_beta_iters is not None
+            assert prioritized_replay_eps is not None
+            assert beta_schedule is not None
+
+        else:
+            rollout_buffer = ReplayBuffer(size=args.memory_length)
+            temp_buffer = ReplayBuffer(size=2*args.batch)
+            beta_schedule=None
+            prioritized_replay_eps=0
 
     # baseline learning
     if not args.use_transfer:
-        DqnNet.use_gpu = not args.cpu_only
+        # DqnNet.use_gpu = not args.cpu_only
         net = DqnNet(
             sess, args.resized_height, args.resized_width, args.phi_len,
-            game_state.env.action_space.n, args.gym_env, gamma=args.gamma,
+            n_actions, args.gym_env, gamma=args.gamma,
             optimizer=args.optimizer, learning_rate=args.lr,
             epsilon=args.epsilon, decay=args.decay, momentum=args.momentum,
             verbose=args.verbose, folder=folder,
-            slow=args.use_slow, tau=args.tau, device=device,
+            slow=args.use_slow, tau=args.tau,
+            device=device if args.cpu_only else device_gpu,
             transformed_bellman=args.transformed_bellman,
             target_consistency_loss=args.target_consistency,
             clip_norm=args.grad_norm_clip,
-            weight_decay=args.weight_decay)
-
+            weight_decay=args.weight_decay,
+            use_rollout=args.use_rollout, use_sil=args.use_sil,
+            double_q=args.double_q)
     # transfer using existing model
     else:
         if args.transfer_folder is not None:
@@ -152,7 +159,7 @@ def run_dqn(args):
         DqnNet.use_gpu = not args.cpu_only
         net = DqnNet(
             sess, args.resized_height, args.resized_width, args.phi_len,
-            game_state.env.action_space.n, args.gym_env, gamma=args.gamma,
+            n_actions, args.gym_env, gamma=args.gamma,
             optimizer=args.optimizer, learning_rate=args.lr,
             epsilon=args.epsilon, decay=args.decay, momentum=args.momentum,
             verbose=args.verbose, folder=folder,
@@ -161,11 +168,34 @@ def run_dqn(args):
             not_transfer_conv2=args.not_transfer_conv2,
             not_transfer_conv3=args.not_transfer_conv3,
             not_transfer_fc1=args.not_transfer_fc1,
-            not_transfer_fc2=args.not_transfer_fc2, device=device,
+            not_transfer_fc2=args.not_transfer_fc2,
+            device=device if args.cpu_only else device_gpu,
             transformed_bellman=args.transformed_bellman,
             target_consistency_loss=args.target_consistency,
             clip_norm=args.grad_norm_clip,
-            weight_decay=args.weight_decay)
+            weight_decay=args.weight_decay,
+            is_rollout_net=False)
+
+    if args.unclipped_reward:
+        reward_type = 'RAW'
+    elif args.log_scale_reward:
+        reward_type = 'LOG'
+    else:
+        reward_type = 'CLIP'
+
+    # rollout thread
+    rollout_worker = None
+    if args.use_rollout:
+        rollout_worker = RolloutThread(
+                    action_size=n_actions, env_id=args.gym_env,
+                    update_in_rollout=args.update_in_rollout,
+                    global_pretrained_model=None, #TODO
+                    local_pretrained_model=None, #TODO
+                    transformed_bellman = args.transformed_bellman,
+                    no_op_max=0,
+                    device=device if args.cpu_only else device_gpu,
+                    clip_norm=args.grad_norm_clip, nstep_bc=0,
+                    reward_type=reward_type)
 
     ##added load human demonstration for testing cam
     demo_memory_folder = None
@@ -175,21 +205,13 @@ def run_dqn(args):
             demo_memory_folder = args.demo_memory_folder
         else:
             demo_memory_folder = 'collected_demo/{}'.format(args.gym_env.replace('-', '_'))
-
         # demo_ids = tuple(map(int, args.demo_ids.split(",")))
 
-    if args.unclipped_reward:
-        reward_type = ''
-    elif args.log_scale_reward:
-        reward_type = 'LOG'
-    else:
-        reward_type = 'CLIP'
-
     experiment = DQNTraining(
-        sess, net, game_state, args.resized_height, args.resized_width,
-        args.phi_len, args.batch, args.gym_env,
+        sess, net, game_state, eval_game_state, args.resized_height, args.resized_width,
+        args.phi_len, n_actions, args.batch, args.gym_env,
         args.gamma, args.observe, args.explore, args.final_epsilon,
-        args.init_epsilon, replay_memory,
+        args.init_epsilon, replay_buffer,
         args.update_freq, args.save_freq, args.eval_freq,
         args.eval_max_steps, args.c_freq,
         folder, load_demo_memory=args.load_memory, demo_ids=args.demo_ids,
@@ -198,7 +220,17 @@ def run_dqn(args):
         train_max_steps=args.train_max_steps,
         human_net=human_net, confidence=args.advice_confidence, psi=args.psi,
         train_with_demo_steps=args.train_with_demo_steps,
-        use_transfer=args.use_transfer, reward_type=reward_type)
+        use_transfer=args.use_transfer, reward_type=reward_type,
+        priority_memory=args.priority_memory, beta_schedule=beta_schedule,
+        prioritized_replay_eps=prioritized_replay_eps,
+        prio_by_td=args.prio_by_td, prio_by_return=args.prio_by_return,
+        update_q_with_return=args.update_q_with_return,
+        use_rollout=args.use_rollout, rollout_buffer=rollout_buffer,
+        rollout_worker=rollout_worker, temp_buffer=temp_buffer,
+        update_in_rollout=args.update_in_rollout,
+        use_sil=args.use_sil, sil_buffer=sil_buffer,
+        sil_priority_memory=args.sil_priority_memory)
+
     experiment.run()
 
     if args.use_human_model_as_advice:

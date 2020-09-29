@@ -4,7 +4,9 @@ import random
 import numpy as np
 import logging
 import os
+import time
 
+from termcolor import colored
 from time import sleep
 from net import Network
 from common.util import plot_conv_weights, graves_rmsprop_optimizer
@@ -28,7 +30,8 @@ class DqnNet(Network):
         not_transfer_conv2=False, not_transfer_conv3=False,
         not_transfer_fc1=False, not_transfer_fc2=False, device="/cpu:0",
         transformed_bellman=False, target_consistency_loss=False,
-        clip_norm=None, weight_decay=None):
+        clip_norm=None, weight_decay=None,use_rollout=False, use_sil=False,
+        double_q=False):
         """ Initialize network """
         Network.__init__(self, sess, name=name)
         self.gamma = gamma
@@ -41,34 +44,60 @@ class DqnNet(Network):
         self.transformed_bellman = transformed_bellman
         self.target_consistency_loss = target_consistency_loss
         self.verbose = verbose
+        self.use_rollout = use_rollout
+        self.use_sil = use_sil
+        self.double_q = double_q
+
+        logger.info("===DQN net===")
+        logger.info("gamma: {}".format(self.gamma))
+        logger.info("optimizer: {}".format(optimizer))
+        logger.info("learning rate: {}".format(learning_rate))
+        logger.info("transformed_bellman: {}".format(
+            colored(self.transformed_bellman,
+                    "green" if self.transformed_bellman else "red")))
+        logger.info("double DQN: {}".format(
+            colored(self.double_q,
+                    "green" if self.double_q else "red")))
+        time.sleep(2)
 
         self.observation = tf.placeholder(tf.float32, [None, height, width, phi_length], name='observation')
         self.observation_n = tf.div(self.observation, 255.)
 
-        with tf.device(self._device), tf.variable_scope('net_-1') as scope:
-            # q network model:
-            self.W_conv1, self.b_conv1 = self.conv_variable([8, 8, phi_length, 32], layer_name='conv1', gain=np.sqrt(2))
-            self.h_conv1 = tf.nn.relu(tf.add(self.conv2d(self.observation_n, self.W_conv1, 4), self.b_conv1), name=self.name + '_conv1_activations')
-            tf.add_to_collection('conv_weights', self.W_conv1)
-            tf.add_to_collection('conv_output', self.h_conv1)
+        self.next_observation = tf.placeholder(tf.float32, [None, height, width, phi_length], name='t_next_observation')
+        self.next_observation_n = tf.div(self.next_observation, 255.)
 
-            self.W_conv2, self.b_conv2 = self.conv_variable([4, 4, 32, 64], layer_name='conv2', gain=np.sqrt(2))
-            self.h_conv2 = tf.nn.relu(tf.add(self.conv2d(self.h_conv1, self.W_conv2, 2), self.b_conv2), name=self.name + '_conv2_activations')
-            tf.add_to_collection('conv_weights', self.W_conv2)
-            tf.add_to_collection('conv_output', self.h_conv2)
+        def q_func_builder(input_placeholder, scope, reuse=False):
+            with tf.device(self._device), tf.variable_scope(scope, reuse=reuse) as scope:
+                # q network model:
+                self.W_conv1, self.b_conv1 = self.conv_variable([8, 8, phi_length, 32], layer_name='conv1', gain=np.sqrt(2))
+                self.h_conv1 = tf.nn.relu(tf.add(self.conv2d(input_placeholder, #self.observation_n,
+                    self.W_conv1, 4), self.b_conv1), name=self.name + '_conv1_activations')
+                tf.add_to_collection('conv_weights', self.W_conv1)
+                tf.add_to_collection('conv_output', self.h_conv1)
 
-            self.W_conv3, self.b_conv3 = self.conv_variable([3, 3, 64, 64], layer_name='conv3', gain=np.sqrt(2))
-            self.h_conv3 = tf.nn.relu(tf.add(self.conv2d(self.h_conv2, self.W_conv3, 1), self.b_conv3), name=self.name + '_conv3_activations')
-            tf.add_to_collection('conv_weights', self.W_conv3)
-            tf.add_to_collection('conv_output', self.h_conv3)
+                self.W_conv2, self.b_conv2 = self.conv_variable([4, 4, 32, 64], layer_name='conv2', gain=np.sqrt(2))
+                self.h_conv2 = tf.nn.relu(tf.add(self.conv2d(self.h_conv1, self.W_conv2, 2), self.b_conv2), name=self.name + '_conv2_activations')
+                tf.add_to_collection('conv_weights', self.W_conv2)
+                tf.add_to_collection('conv_output', self.h_conv2)
 
-            self.h_conv3_flat = tf.reshape(self.h_conv3, [-1, 3136])
+                self.W_conv3, self.b_conv3 = self.conv_variable([3, 3, 64, 64], layer_name='conv3', gain=np.sqrt(2))
+                self.h_conv3 = tf.nn.relu(tf.add(self.conv2d(self.h_conv2, self.W_conv3, 1), self.b_conv3), name=self.name + '_conv3_activations')
+                tf.add_to_collection('conv_weights', self.W_conv3)
+                tf.add_to_collection('conv_output', self.h_conv3)
 
-            self.W_fc1, self.b_fc1 = self.fc_variable([3136, 512], layer_name='fc1', gain=np.sqrt(2))
-            self.h_fc1 = tf.nn.relu(tf.add(tf.matmul(self.h_conv3_flat, self.W_fc1), self.b_fc1), name=self.name + '_fc1_activations')
+                self.h_conv3_flat = tf.reshape(self.h_conv3, [-1, 3136])
 
-            self.W_fc2, self.b_fc2 = self.fc_variable([512, n_actions], layer_name='fc2')
-            self.q_value = tf.add(tf.matmul(self.h_fc1, self.W_fc2), self.b_fc2, name=self.name + '_fc1_outputs')
+                self.W_fc1, self.b_fc1 = self.fc_variable([3136, 512], layer_name='fc1', gain=np.sqrt(2))
+                self.h_fc1 = tf.nn.relu(tf.add(tf.matmul(self.h_conv3_flat, self.W_fc1), self.b_fc1), name=self.name + '_fc1_activations')
+
+                self.W_fc2, self.b_fc2 = self.fc_variable([512, n_actions], layer_name='fc2')
+                #self.
+                q_value = tf.add(tf.matmul(self.h_fc1, self.W_fc2), self.b_fc2, name=self.name + '_fc1_outputs')
+                return q_value
+
+        self.q_value = q_func_builder(self.observation_n, scope='net_-1')
+        if self.double_q:
+            self.double_q_value = q_func_builder(self.next_observation_n, scope='net_-1', reuse=True)
 
         if self.target_consistency_loss:
             self.tc_observation = tf.placeholder(tf.float32, [None, height, width, phi_length], name='observation_tc')
@@ -102,8 +131,6 @@ class DqnNet(Network):
         if self.verbose:
             self.init_verbosity()
 
-        self.next_observation = tf.placeholder(tf.float32, [None, height, width, phi_length], name='t_next_observation')
-        self.next_observation_n = tf.div(self.next_observation, 255.)
 
         with tf.device(self._device), tf.variable_scope('net_-1-target') as scope:
             # target q network model:
@@ -131,7 +158,11 @@ class DqnNet(Network):
 
         with tf.device(self._device):
             # cost of q network
-            self.cost = self.build_loss(n_actions) #+ self.l2_regularizer_loss
+            self.cost, self.td_error = self.build_loss(n_actions) #+ self.l2_regularizer_loss
+            # sil cost for rollout
+            if self.use_rollout or self.use_sil:
+                self.td_loss, self.masked_td_loss, self.sil_td_error, \
+                    self.clipped_sil_td_error, self.sil_cost = self.build_sil_loss(n_actions)
 
             with tf.name_scope("Train") as scope:
                 if optimizer == "Adam":
@@ -157,11 +188,19 @@ class DqnNet(Network):
                 gradients = list(zip(gradients, self.get_vars()))
                 self.train_step = self.opt.apply_gradients(gradients)
 
+                # sil cost for rollout
+                if self.use_rollout or self.use_sil:
+                    sil_var_refs = [v._ref() for v in self.get_vars()]
+                    sil_gradients = tf.gradients(self.sil_cost, sil_var_refs)
+                    if clip_norm is not None:
+                        sil_gradients, sil_grad_norm = tf.clip_by_global_norm(sil_gradients, clip_norm)
+                    sil_gradients = list(zip(sil_gradients, self.get_vars()))
+                    self.sil_train_step = self.opt.apply_gradients(sil_gradients)
+
         def initialize_uninitialized(sess):
             global_vars = tf.global_variables()
             is_not_initialized = sess.run([tf.is_variable_initialized(var) for var in global_vars])
             not_initialized_vars = [v for (v, f) in zip(global_vars, is_not_initialized) if not f]
-
             if len(not_initialized_vars):
                 sess.run(tf.variables_initializer(not_initialized_vars))
 
@@ -183,6 +222,13 @@ class DqnNet(Network):
     def update_target_network(self, name=None, slow=False):
         logger.info('update target network')
         self.sess.run(self.update_target_op(name=name, slow=slow))
+
+    def sync_rollout_network(self, src_network=None, name=None, slow=False):
+        # op for rollout net only
+        assert self.is_rollout_net == True
+        assert src_network is not None
+        logger.info('sync rollout network with global network')
+        self.sync_from(src_network=src_network, name=name, slow=False)
 
     def get_vars(self):
         return [
@@ -217,6 +263,19 @@ class DqnNet(Network):
 
                 return tf.group(*sync_ops, name=name)
 
+    def sync_from(self, src_network, name=None, slow=False):
+        src_vars = src_network.get_vars()
+        dst_vars = self.get_vars()
+
+        sync_ops = []
+        with tf.device(self._device):
+            with tf.name_scope(name, "DqnNet", []) as name:
+                for(src_var, dst_var) in zip(src_vars, dst_vars):
+                    sync_op = tf.assign(dst_var, src_var)
+                    sync_ops.append(sync_op)
+
+                return tf.group(*sync_ops, name=name)
+
     def evaluate(self, state):
         return self.sess.run(self.q_value, feed_dict={self.observation: [state]})
 
@@ -231,8 +290,19 @@ class DqnNet(Network):
             self.actions = tf.placeholder(tf.float32, shape=[None, n_actions], name="actions") # one-hot matrix
             self.rewards = tf.placeholder(tf.float32, shape=[None], name="rewards")
             self.terminals = tf.placeholder(tf.float32, shape=[None], name="terminals")
+            self.imp_weights = tf.placeholder(tf.float32, [None], name="weight")
+
+            # q scores for actions which we know were selected in the given state.
             predictions = tf.reduce_sum(tf.multiply(self.q_value, self.actions), axis=1)
-            max_action_values = tf.reduce_max(self.t_q_value, axis=1)
+
+            if self.double_q:
+                # double_q_value = tf.reduce_sum(tf.multiply(self.double_q_value, self.actions), axis=1)
+                max_double_q_action_values = tf.argmax(self.double_q_value , axis=1)
+                max_action_values = tf.reduce_sum(tf.multiply(self.t_q_value,
+                                                              tf.one_hot(max_double_q_action_values,
+                                                              n_actions)), axis=1)
+            else:
+                max_action_values = tf.reduce_max(self.t_q_value, axis=1)
 
             def h(z, eps=10**-2):
                 return (tf.sign(z) * (tf.sqrt(tf.abs(z) + 1.) - 1.)) + (eps * z)
@@ -252,10 +322,12 @@ class DqnNet(Network):
             else:
                 targets = self.rewards + (self.gamma * max_action_values * (1 - self.terminals))
 
+            td_error = predictions - tf.stop_gradient(targets)
             td_loss = tf.losses.huber_loss(
                 tf.stop_gradient(targets),
                 predictions,
                 reduction=tf.losses.Reduction.NONE)
+            # weighted_loss = tf.reduce_mean(self.imp_weights * td_loss)
 
             if self.target_consistency_loss:
                 t_actions_one_hot = tf.one_hot(tf.argmax(self.t_q_value, axis=1), n_actions, 1.0, 0.0)
@@ -264,13 +336,14 @@ class DqnNet(Network):
                     tf.stop_gradient(max_action_values),
                     max_action_values_q,
                     reduction=tf.losses.Reduction.NONE)
-                total_loss = tf.reduce_mean(td_loss + tc_loss)
+                total_loss = tf.reduce_mean(self.imp_weights * td_loss + tc_loss)
             else:
-                total_loss = tf.reduce_mean(td_loss)
+                total_loss = tf.reduce_mean(self.imp_weights * td_loss)
 
             loss = total_loss
 
             tf.summary.scalar("loss", loss)
+            tf.summary.scalar("td_error", tf.reduce_max(td_error))
             tf.summary.scalar("cost_min", tf.reduce_max(td_loss))
             tf.summary.scalar("cost_max", tf.reduce_max(td_loss))
             tf.summary.scalar("target_min", tf.reduce_min(targets))
@@ -278,7 +351,59 @@ class DqnNet(Network):
             tf.summary.scalar("acted_Q_min", tf.reduce_min(predictions))
             tf.summary.scalar("acted_Q_max", tf.reduce_max(predictions))
             tf.summary.scalar("reward_max", tf.reduce_max(self.rewards))
-            return loss
+            return loss, td_error
+
+
+    def build_sil_loss(self, n_actions, min_batch_size=1):
+        with tf.name_scope("SIL_Loss") as scope:
+            self.sil_actions = tf.placeholder(tf.float32, shape=[None, n_actions], name="sil_actions") # one-hot matrix
+            self.sil_rewards = tf.placeholder(tf.float32, shape=[None], name="sil_rewards")
+            self.sil_terminals = tf.placeholder(tf.float32, shape=[None], name="sil_terminals")
+            self.sil_imp_weights = tf.placeholder(tf.float32, [None], name="sil_weight")
+            predictions = tf.reduce_sum(tf.multiply(self.q_value, self.sil_actions), axis=1)
+            max_action_values = tf.reduce_max(self.t_q_value, axis=1)
+
+            def h(z, eps=10**-2):
+                return (tf.sign(z) * (tf.sqrt(tf.abs(z) + 1.) - 1.)) + (eps * z)
+
+            def h_inv(z, eps=10**-2):
+                return tf.sign(z) * (tf.square((tf.sqrt(1 + 4 * eps * (tf.abs(z) + 1 + eps)) - 1) / (2 * eps)) - 1)
+
+            def h_log(z, eps=1):
+                return (tf.sign(z) * tf.log(1. + tf.abs(z)) * eps)
+
+            def h_inv_log(z, eps=1):
+                return tf.sign(z) * (tf.math.exp(tf.abs(z) / eps) - 1)
+
+            if self.transformed_bellman:
+                transformed = h(self.sil_rewards + self.gamma * h_inv(max_action_values) * (1 - self.sil_terminals))
+                targets = transformed
+            else:
+                targets = self.sil_rewards + (self.gamma * max_action_values * (1 - self.sil_terminals))
+
+            # only update with positive td error, create a mask
+            td_error = tf.stop_gradient(targets) - predictions
+            mask = tf.where(td_error > 0.0,
+                            tf.ones_like(self.sil_rewards),
+                            tf.zeros_like(self.sil_rewards))
+            self.num_valid_samples = tf.reduce_sum(mask)
+            self.num_samples = tf.maximum(self.num_valid_samples,
+                                          min_batch_size)
+            clipped_td_error = tf.stop_gradient(
+                    tf.maximum(tf.zeros_like(td_error), td_error))
+
+            td_loss = tf.losses.huber_loss(
+                tf.stop_gradient(targets),
+                predictions,
+                reduction=tf.losses.Reduction.NONE)
+
+            masked_td_loss = td_loss * mask
+
+            total_loss = tf.reduce_sum(self.sil_imp_weights * masked_td_loss) / self.num_samples
+
+            loss = total_loss
+
+            return td_loss, masked_td_loss, td_error, clipped_td_error, loss
 
     def grad_cam(self, s_batch, a_batch):
         g = tf.get_default_graph()
@@ -302,10 +427,10 @@ class DqnNet(Network):
                                                            self.actions: a_batch})
             return conv_value, convgrad_value, gbgrad_value
 
-    def train(self, s_j_batch, a_batch, r_batch, s_j1_batch, terminal, global_t):
+    def train(self, s_j_batch, a_batch, r_batch, s_j1_batch, terminal, importance_weights, global_t):
         if self.target_consistency_loss:
-            summary, _, _ = self.sess.run(
-                [self.summary_op, self.train_step, self.cost],
+            summary, _, _, td_error = self.sess.run(
+                [self.summary_op, self.train_step, self.cost, self.td_error],
                 feed_dict={
                     self.observation: s_j_batch,
                     self.tc_observation: s_j1_batch,
@@ -314,17 +439,52 @@ class DqnNet(Network):
                     self.rewards: r_batch,
                     self.terminals: terminal})
         else:
-            summary, _, _ = self.sess.run(
-                [self.summary_op, self.train_step, self.cost],
+            summary, _, _, td_error = self.sess.run(
+                [self.summary_op, self.train_step, self.cost, self.td_error],
                 feed_dict={
                     self.observation: s_j_batch,
                     self.actions: a_batch,
                     self.next_observation: s_j1_batch,
                     self.rewards: r_batch,
-                    self.terminals: terminal})
+                    self.terminals: terminal,
+                    self.imp_weights: importance_weights})
 
         if self.verbose:
             self.add_summary(summary, global_t)
+
+        return td_error
+
+
+    def sil_train(self, s_j_batch, a_batch, r_batch, s_j1_batch, terminal, importance_weights, global_t):
+        _, td_loss, masked_td_loss, sil_td_errpr, clipped_sil_td_error, sil_cost = self.sess.run(
+            [self.sil_train_step, self.td_loss, self.masked_td_loss, self.sil_td_error,
+             self.clipped_sil_td_error, self.sil_cost],
+            feed_dict={
+                self.observation: s_j_batch,
+                self.sil_actions: a_batch,
+                self.next_observation: s_j1_batch,
+                self.sil_rewards: r_batch,
+                self.sil_terminals: terminal,
+                self.sil_imp_weights: importance_weights})
+
+        if self.verbose:
+            self.add_summary(summary, global_t)
+
+        return td_loss, masked_td_loss, sil_td_errpr, clipped_sil_td_error, sil_cost
+
+
+    def get_td_error(self, s_j_batch, a_batch, r_batch, s_j1_batch, terminal, importance_weights, global_t):
+        td_error = self.sess.run(
+            self.td_error,
+            feed_dict={
+                self.observation: s_j_batch,
+                self.actions: a_batch,
+                self.next_observation: s_j1_batch,
+                self.rewards: r_batch,
+                self.terminals: terminal,
+                self.imp_weights: importance_weights})
+
+        return td_error
 
     def record_summary(self, score=0, steps=0, episodes=None, global_t=0, mode='Test'):
         summary = tf.Summary()
@@ -358,14 +518,13 @@ class DqnNet(Network):
 
         return has_checkpoint
 
-    def save(self, step=-1):
+    def save(self, step=0):
         logger.debug('saving checkpoint...')
-        if step < 0:
-            self.saver.save(self.sess, self.folder + '/{}_checkpoint_dqn'.format(self.name.replace('-', '_')))
-        else:
-            self.saver.save(self.sess, self.folder + '/{}_checkpoint_dqn'.format(self.name.replace('-', '_')), global_step=step)
-
-        logger.info('Successfully saved checkpoint!')
+        # if step < 0:
+        #     self.saver.save(self.sess, self.folder + '/{}_checkpoint_dqn'.format(self.name.replace('-', '_')))
+        # else:
+        self.saver.save(self.sess, self.folder + '/{}_checkpoint_dqn'.format(self.name.replace('-', '_')), global_step=step)
+        logger.info('Successfully saved model checkpoint at step {}!'.format(step))
 
         # logger.info('Saving convolutional weights as images...')
         # conv_weights = self.sess.run([tf.get_collection('conv_weights')])
