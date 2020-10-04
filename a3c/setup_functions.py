@@ -71,13 +71,21 @@ def setup_folder(args, env_name):
             if args.roll_any:
                 end_str+="_rollany"
             if args.add_all_rollout:
-                end_str+='_addallrollout'
+                end_str+='_addall'
             if args.nstep_bc != 100000:
                 end_str+='_{}stepbc'.format(args.nstep_bc)
             if args.update_in_rollout:
                 end_str+='_updateinrollout'
             if args.delay_rollout > 0:
                 end_str+='_delayrollout{}'.format(args.delay_rollout)
+
+        if args.rollout_sample_proportion is not None:
+            end_str+='_fixsample'
+            end_str+='_D{}-R{}'.format(str(int(10-args.rollout_sample_proportion*10)),
+                                       str(int(args.rollout_sample_proportion*10)))
+        else:
+            if args.use_rollout:
+                end_str+='_adptsample'
 
         folder += end_str
 

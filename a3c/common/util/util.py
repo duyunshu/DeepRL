@@ -17,6 +17,13 @@ from math import sqrt
 logger = logging.getLogger("util")
 
 
+def convert_onehot_to_a(onehot_actions):
+    batch_actions = []
+    for a in onehot_actions:
+        batch_actions.append(np.argmax(a))
+    return batch_actions
+
+    
 def percent_decrease(v1, v2):
     """Compute percent difference.
 

@@ -8,8 +8,7 @@ import matplotlib.pyplot as plt
 
 from common.game_state import GameState
 from common.game_state import get_wrapper_by_name
-from common.util import transform_h
-from common.util import transform_h_inv
+from common.util import convert_onehot_to_a
 from termcolor import colored
 from queue import Queue, PriorityQueue
 from copy import deepcopy
@@ -34,7 +33,8 @@ class SILTrainingThread(CommonWorker):
     def __init__(self, thread_index, global_net, local_net,
                  initial_learning_rate, learning_rate_input, grad_applier,
                  device=None, batch_size=None,
-                 use_rollout=False, train_classifier=False, use_sil_neg=False):
+                 use_rollout=False, rollout_sample_proportion=None,
+                 train_classifier=False, use_sil_neg=False):
         """Initialize A3CTrainingThread class."""
         assert self.action_size != -1
 
@@ -129,8 +129,13 @@ class SILTrainingThread(CommonWorker):
             phi_length=self.local_net.in_shape[2],
             reward_constant=self.reward_constant)
 
-        self.pick_samples = SILReplayMemory(
-            self.action_size, max_len=self.batch_size*2, gamma=self.gamma,
+        # init temp buffer
+        if not self.use_rollout or rollout_sample_proportion is not None:
+            max_len = self.batch_size
+        else:
+            max_len = self.batch_size*2
+        self.temp_buffer = SILReplayMemory(
+            self.action_size, max_len=max_len, gamma=self.gamma,
             clip=reward_clipped,
             height=self.local_net.in_shape[0],
             width=self.local_net.in_shape[1],
@@ -188,7 +193,7 @@ class SILTrainingThread(CommonWorker):
                   sil_rollout_sampled_return, sil_rollout_used_return,
                   sil_rollout_used_adv,
                   sil_old_sampled, sil_old_used,
-                  rollout_buffer=None, rollout_proportion=0, stop_rollout=False,
+                  rollout_buffer=None, rollout_sample_proportion=0, stop_rollout=False,
                   roll_any=False):
         """Self-imitation learning process."""
 
@@ -208,113 +213,133 @@ class SILTrainingThread(CommonWorker):
         num_old_used = 0
 
         for _ in range(m):
-            r_batch_size = 0
-            if rollout_buffer is not None and len(rollout_buffer) > self.batch_size:
-                r_batch_size = self.batch_size
+            self.temp_buffer.reset()
+            print("temp buffer size init: ", len(self.temp_buffer))
+            print("temp buffer max size: ", self.temp_buffer.buff._maxsize)
+            s_batch_size, r_batch_size = 0, 0
+            if not self.use_rollout: # a3ctbsil
+                s_batch_size = self.batch_size
+            else:
+                assert rollout_buffer is not None
+                # adaptive sampling ratio
+                if rollout_sample_proportion is None:
+                    s_batch_size = self.batch_size
+                    r_batch_size = self.batch_size
+                # fixed sampling ratio
+                else:
+                    assert rollout_sample_proportion > 0 # rollout proportion=0 is actually just a3tbsil
+                    s_batch_size = round(self.batch_size * (1 - rollout_sample_proportion))
+                    r_batch_size = round(self.batch_size * rollout_sample_proportion)
+
+            # take from buffer a3c (old)
+            if s_batch_size > 0 and len(sil_memory) > s_batch_size:
+                s_sample = sil_memory.sample(s_batch_size , beta=0.4)
+                s_index_list, s_batch, s_weights = s_sample
+                s_batch_state, s_action, s_batch_returns, \
+                    s_batch_fullstate, s_batch_rollout, s_batch_refresh = s_batch
+                s_batch_action = convert_onehot_to_a(s_action)
+                sil_a3c_sampled_return += np.sum(s_batch_returns)
+                self.temp_buffer.extend_one_priority(s_batch_state, s_batch_fullstate,
+                    s_batch_action, s_batch_returns, s_batch_rollout, s_batch_refresh)
+                # update priority of sampled experiences
+                self.update_priorities_once(sess, sil_memory, s_index_list,
+                                            s_batch_state, s_action, s_batch_returns)
+                print("added D ",len(s_batch_action))
+
+            # take from buffer rollout (new)
+            if r_batch_size > 0 and len(rollout_buffer) > r_batch_size:
                 r_sample = rollout_buffer.sample(r_batch_size, beta=0.4)
                 r_index_list, r_batch, r_weights = r_sample
                 r_batch_state, r_action, r_batch_returns, \
                     r_batch_fullstate, r_batch_rollout, r_batch_refresh = r_batch
-                r_batch_action = []
-                for a in r_action:
-                    r_batch_action.append(np.argmax(a))
-                self.pick_samples.extend_one_priority(r_batch_state,
-                    r_batch_fullstate, r_batch_action, r_batch_returns,
-                    r_batch_rollout, r_batch_refresh)
+                r_batch_action = convert_onehot_to_a(r_action)
                 sil_rollout_sampled_return += np.sum(r_batch_returns)
-
-            s_batch_size = self.batch_size
-            s_sample = sil_memory.sample(s_batch_size , beta=0.4)
-            s_index_list, s_batch, s_weights = s_sample
-            s_batch_state, s_action, s_batch_returns, \
-                s_batch_fullstate, s_batch_rollout, s_batch_refresh = s_batch
-            s_batch_action = []
-            for a in s_action:
-                s_batch_action.append(np.argmax(a))
-            self.pick_samples.extend_one_priority(s_batch_state, s_batch_fullstate,
-                s_batch_action, s_batch_returns, s_batch_rollout, s_batch_refresh)
-            sil_a3c_sampled_return += np.sum(s_batch_returns)
-
-            # pick 32 out of 64
-            sample = self.pick_samples.sample(self.batch_size, beta=0.4)
-            index_list, batch, weights = sample
-            batch_state, batch_action, batch_returns, \
-                batch_fullstate, batch_rollout, batch_refresh = batch
-
-            if self.use_rollout:
-                num_rollout_sampled += np.sum(batch_rollout)
-                num_old_sampled += np.sum(batch_refresh)
-
-            feed_dict = {
-                self.local_net.s: batch_state,
-                self.local_net.a_sil: batch_action,
-                self.local_net.returns: batch_returns,
-                self.local_net.weights: weights,
-                self.learning_rate_input: cur_learning_rate,
-                }
-            fetch = [
-                self.local_net.clipped_advs,
-                self.local_net.advs,
-                self.sil_apply_gradients,
-                self.sil_apply_gradients_local,
-                ]
-            adv_clip, adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
-            # logger.info("adv_clip: {}".format(adv_clip))
-            # logger.info("adv_raw: {}".format(adv))
-            pos_idx = [i for (i, num) in enumerate(adv) if num > 0]
-            neg_idx = [i for (i, num) in enumerate(adv) if num <= 0]
-            total_used += len(pos_idx)
-            num_rollout_used += np.sum(np.take(batch_rollout, pos_idx))
-            num_a3c_used += (len(pos_idx) - np.sum(np.take(batch_rollout, pos_idx)))
-            num_old_used += np.sum(np.take(batch_refresh, pos_idx))
-            if self.use_sil_neg:
-                total_used += len(neg_idx)
-
-            rollout_idx = [i for (i, num) in enumerate(batch_rollout) if num > 0]
-            pos_rollout_idx = np.intersect1d(rollout_idx, pos_idx)
-            if len(pos_rollout_idx) > 0 and len(pos_rollout_idx) == num_rollout_used:
-                sil_rollout_used_return += np.sum(np.take(batch_returns, pos_rollout_idx))
-                sil_rollout_used_adv += np.sum(np.take(adv, pos_rollout_idx))
-
-            a3c_idx = [i for (i, num) in enumerate(batch_rollout) if num <= 0]
-            pos_a3c_idx = np.intersect1d(a3c_idx, pos_idx)
-            if len(pos_a3c_idx) > 0 and len(pos_a3c_idx)==num_a3c_used:
-                sil_a3c_used_return += np.sum(np.take(batch_returns, pos_a3c_idx))
-                sil_a3c_used_adv += np.sum(np.take(adv, pos_a3c_idx))
-
-            # update priority
-            self.update_priorities_once(sess, sil_memory, s_index_list,
-                                        s_batch_state, s_action, s_batch_returns)
-            if r_batch_size > 0:
+                self.temp_buffer.extend_one_priority(r_batch_state, r_batch_fullstate,
+                    r_batch_action, r_batch_returns, r_batch_rollout, r_batch_refresh)
+                # update priority of sampled experiences
                 self.update_priorities_once(sess, rollout_buffer, r_index_list,
                                             r_batch_state, r_action, r_batch_returns)
+                print("added R ", len(r_batch_action))
 
-            # find the index of good samples
-            if self.train_classifier:
-                for i in pos_idx:
-                    goodstate_queue.put(
-                        (deepcopy([ batch_state[i] ]),
-                         deepcopy([ batch_fullstate[i] ]),
-                         deepcopy([ np.argmax(batch_action[i]) ]),
-                         deepcopy([ batch_returns[i] ]),
-                         deepcopy([ batch_rollout[i] ]))
-                        )
-            # find the index of bad samples if we are rolling out specifically from bad states
-            # otherwise, just let rollout sample from shared_memory
-            if self.use_rollout and not stop_rollout and not roll_any:
-                for i in neg_idx:
-                    badstate_queue.put(
-                         (  adv[i], #first sort by adv
-                            -(int(datetime.now().second + datetime.now().microsecond)),  #if adv same, sort by newest first
-                            (deepcopy(batch_state[i]),
-                             deepcopy(batch_fullstate[i]),
-                             deepcopy(np.argmax(batch_action[i])),
-                             deepcopy(batch_returns[i]),
-                             deepcopy(batch_rollout[i]))
-                         )
-                        )
+            print("temp buffer size after add: ", len(self.temp_buffer))
+            # pick 32 out of mixed (could be 64 or just 32 if no rollout)
+            # make sure the temp buffer has been filled
+            if len(self.temp_buffer) >= self.batch_size:
+                print("sampled from temp buffer, making sil updates...")
+                sample = self.temp_buffer.sample(self.batch_size, beta=0.4)
+                index_list, batch, weights = sample
+                batch_state, batch_action, batch_returns, \
+                    batch_fullstate, batch_rollout, batch_refresh = batch
 
-            sil_ctr += 1
+                if self.use_rollout:
+                    num_rollout_sampled += np.sum(batch_rollout)
+                    num_old_sampled += np.sum(batch_refresh)
+
+                feed_dict = {
+                    self.local_net.s: batch_state,
+                    self.local_net.a_sil: batch_action,
+                    self.local_net.returns: batch_returns,
+                    self.local_net.weights: weights,
+                    self.learning_rate_input: cur_learning_rate,
+                    }
+                fetch = [
+                    self.local_net.clipped_advs,
+                    self.local_net.advs,
+                    self.sil_apply_gradients,
+                    self.sil_apply_gradients_local,
+                    ]
+                adv_clip, adv, _, _ = sess.run(fetch, feed_dict=feed_dict)
+                # logger.info("adv_clip: {}".format(adv_clip))
+                # logger.info("adv_raw: {}".format(adv))
+                pos_idx = [i for (i, num) in enumerate(adv) if num > 0]
+                neg_idx = [i for (i, num) in enumerate(adv) if num <= 0]
+                total_used += len(pos_idx)
+                num_rollout_used += np.sum(np.take(batch_rollout, pos_idx))
+                num_a3c_used += (len(pos_idx) - np.sum(np.take(batch_rollout, pos_idx)))
+                num_old_used += np.sum(np.take(batch_refresh, pos_idx))
+                if self.use_sil_neg:
+                    total_used += len(neg_idx)
+
+                rollout_idx = [i for (i, num) in enumerate(batch_rollout) if num > 0]
+                pos_rollout_idx = np.intersect1d(rollout_idx, pos_idx)
+                if len(pos_rollout_idx) > 0 and len(pos_rollout_idx) == num_rollout_used:
+                    sil_rollout_used_return += np.sum(np.take(batch_returns, pos_rollout_idx))
+                    sil_rollout_used_adv += np.sum(np.take(adv, pos_rollout_idx))
+
+                a3c_idx = [i for (i, num) in enumerate(batch_rollout) if num <= 0]
+                pos_a3c_idx = np.intersect1d(a3c_idx, pos_idx)
+                if len(pos_a3c_idx) > 0 and len(pos_a3c_idx)==num_a3c_used:
+                    sil_a3c_used_return += np.sum(np.take(batch_returns, pos_a3c_idx))
+                    sil_a3c_used_adv += np.sum(np.take(adv, pos_a3c_idx))
+
+                # find the index of good samples
+                if self.train_classifier:
+                    for i in pos_idx:
+                        goodstate_queue.put(
+                            (deepcopy([ batch_state[i] ]),
+                             deepcopy([ batch_fullstate[i] ]),
+                             deepcopy([ np.argmax(batch_action[i]) ]),
+                             deepcopy([ batch_returns[i] ]),
+                             deepcopy([ batch_rollout[i] ]))
+                            )
+                # find the index of bad samples if we are rolling out specifically from bad states
+                # otherwise, just let rollout sample from shared_memory
+                if self.use_rollout and not stop_rollout and not roll_any:
+                    for i in neg_idx:
+                        badstate_queue.put(
+                             (  adv[i], #first sort by adv
+                                -(int(datetime.now().second + datetime.now().microsecond)),  #if adv same, sort by newest first
+                                (deepcopy(batch_state[i]),
+                                 deepcopy(batch_fullstate[i]),
+                                 deepcopy(np.argmax(batch_action[i])),
+                                 deepcopy(batch_returns[i]),
+                                 deepcopy(batch_rollout[i]))
+                             )
+                            )
+
+                sil_ctr += 1
+                print("sil_ctr:", sil_ctr)
+                time.sleep(2)
 
         sil_a3c_sampled += (self.batch_size*m - num_rollout_sampled)
         sil_a3c_used += num_a3c_used

@@ -148,13 +148,13 @@ def main():
     parser.add_argument('--use-sil-skip', action='store_true',
                         help='test if less #sil result in worse performace')
     parser.set_defaults(use_sil_skip=False)
+    parser.add_argument('--rollout-sample-proportion', type=float, default=None,
+                        help='The proportion to sample from rollout during sil, range 0-1')
 
     # rollout parameters
     parser.add_argument('--use-rollout', action='store_true',
                         help='use human model to correct actions')
     parser.set_defaults(use_rollout=False)
-    parser.add_argument('--rollout-proportion', type=float, default=0.5,
-                        help='The proportion to sample from rollout during sil')
     parser.add_argument('--add-all-rollout', action='store_true',
                         help='add all rollout data, otherwise, add only when new return is better')
     parser.set_defaults(add_all_rollout=False)
@@ -221,6 +221,9 @@ def main():
 
 
     args = parser.parse_args()
+
+    if args.rollout_sample_proportion is not None:
+        assert args.rollout_sample_proportion > 0
 
     if args.test_model:
         logger.info('Testing A3C model...')

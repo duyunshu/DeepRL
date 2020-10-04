@@ -323,6 +323,7 @@ def run_a3c(args):
             grad_applier, device="/gpu:0" if args.use_gpu else device,
             batch_size=args.batch_size,
             use_rollout=args.use_rollout,
+            rollout_sample_proportion=args.rollout_sample_proportion,
             train_classifier=args.train_classifier,
             use_sil_neg=args.use_sil_neg)
 
@@ -589,7 +590,7 @@ def run_a3c(args):
     # last_temp_global_t = global_t
     # ispretrain_markers = [False] * args.parallel_size
 
-    _rollout_proportion = args.rollout_proportion
+    rollout_sample_proportion = args.rollout_sample_proportion
     _stop_rollout = False
     last_reward = -(sys.maxsize)
     class_last_reward = -(sys.maxsize)
@@ -598,7 +599,7 @@ def run_a3c(args):
         nonlocal global_t, step_t, rewards, class_rewards, lock, \
                  next_save_t, next_global_t, a3clog
         nonlocal shared_memory, exp_buffer, rollout_buffer
-        nonlocal _rollout_proportion, _stop_rollout, last_reward, class_last_reward
+        nonlocal rollout_sample_proportion, _stop_rollout, last_reward, class_last_reward
         nonlocal sil_dict, sil_ctr, sil_a3c_sampled, sil_a3c_used, \
                  sil_a3c_sampled_return, sil_a3c_used_return, sil_a3c_used_adv,\
                  sil_rollout_sampled, sil_rollout_used, \
@@ -792,7 +793,7 @@ def run_a3c(args):
                     th_ctr.get()
 
                     if args.stop_rollout and class_last_reward <= last_reward:
-                        _rollout_proportion = 0
+                        rollout_sample_proportion = 0
                         _stop_rollout = True
 
                     train_out = parallel_worker.sil_train(
@@ -805,7 +806,7 @@ def run_a3c(args):
                         sil_rollout_used_adv,
                         sil_old_sampled, sil_old_used,
                         rollout_buffer=rollout_buffer,
-                        rollout_proportion=_rollout_proportion,
+                        rollout_sample_proportion=rollout_sample_proportion,
                         stop_rollout=_stop_rollout,
                         roll_any=args.roll_any)
 
@@ -846,7 +847,7 @@ def run_a3c(args):
                         parallel_worker.record_sil(sil_ctr=sil_ctr,
                                               total_used=(sil_a3c_used + sil_rollout_used),
                                               num_a3c_used=sil_a3c_used,
-                                              a3c_used_return=sil_a3c_used_return/sil_a3c_used,
+                                              a3c_used_return=sil_a3c_used_return/(sil_a3c_used+1),
                                               rollout_sampled=sil_rollout_sampled,
                                               rollout_used=sil_rollout_used,
                                               rollout_used_return=sil_rollout_used_return/(sil_rollout_used+1),
@@ -940,9 +941,9 @@ def run_a3c(args):
                 th_ctr.get()
                 diff_global_t = 0
 
-                if global_t < args.advice_budget and _rollout_proportion > 0 and \
+                if global_t < args.advice_budget and \
                    global_t > (args.delay_rollout*args.eval_freq) and \
-                   len(shared_memory) >= 1:
+                   len(shared_memory) >= 1: # rollout_sample_proportion > 0 and \
 
                     if not args.roll_any:
                         _, _, sample = badstate_queue.get()
@@ -1239,16 +1240,6 @@ def run_a3c(args):
 
     checkpoint_file = str(folder / '{}_checkpoint_a3c'.format(GYM_ENV_NAME))
     root_saver.save(sess, checkpoint_file, global_step=global_t)
-
-
-    # reward_fname = folder / '{}-a3c-rewards.pkl'.format(GYM_ENV_NAME)
-    # pickle.dump(rewards, reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
-    # class_reward_fname = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
-    # pickle.dump(class_rewards, class_reward_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
-    # sil_fname = folder / '{}-a3c-sil.pkl'.format(GYM_ENV_NAME)
-    # pickle.dump(sil_dict, sil_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
-    # rollout_fname = folder / '{}-a3c-rollout.pkl'.format(GYM_ENV_NAME)
-    # pickle.dump(rollout_dict, rollout_fname.open('wb'), pickle.HIGHEST_PROTOCOL)
 
     dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
                 [reward_fname, sil_fname, rollout_fname, a3c_fname])

@@ -97,6 +97,11 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self._it_min = MinSegmentTree(it_capacity)
         self._max_priority = 1.0
 
+    def reset(self):
+        self._storage = []
+        self._next_idx = 0
+        self._max_priority = 1.0
+
     def add(self, *args, **kwargs):
         """See ReplayBuffer.store_effect"""
         idx = self._next_idx
@@ -184,7 +189,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         idxes = random.randint(0, len(self._storage) - 1)
         # change refreshed to True
         self._storage[idxes][-1] = True
-        data = self._storage[idxes]       
+        data = self._storage[idxes]
         return data
 
     def update_priorities(self, idxes, priorities):

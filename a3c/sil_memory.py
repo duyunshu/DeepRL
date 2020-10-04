@@ -92,15 +92,17 @@ class SILReplayMemory(object):
 
     def reset(self):
         """Reset memory."""
-        assert not self.priority
-        self.states.clear()
-        self.fullstates.clear()
-        self.actions.clear()
-        self.rewards.clear()
-        self.terminal.clear()
-        self.returns.clear()
-        self.from_rollout.clear()
-        self.refreshed.clear()
+        if self.priority:
+            self.buff .reset()
+        else:
+            self.states.clear()
+            self.fullstates.clear()
+            self.actions.clear()
+            self.rewards.clear()
+            self.terminal.clear()
+            self.returns.clear()
+            self.from_rollout.clear()
+            self.refreshed.clear()
 
     def shape(self):
         """Return shape of state."""
