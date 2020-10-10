@@ -857,7 +857,7 @@ def run_a3c(args):
                                               bads=badstate_queue.qsize(),
                                               global_t=global_t)
 
-                        if sil_ctr % 100 == 0:
+                        if sil_ctr % 100 == 0 and sil_ctr > 0:
                             rollout_buffsize = 0
                             if not args.one_buffer:
                                 rollout_buffsize = len(rollout_buffer)
@@ -898,7 +898,7 @@ def run_a3c(args):
                                                    rollout_sampled=sil_rollout_sampled,
                                                    rollout_used=sil_rollout_used,
                                                    global_t=global_t)
-                        if sil_ctr % 100 == 0:
+                        if sil_ctr % 100 == 0 and sil_ctr > 0:
                             log_data = (sil_ctr, sil_a3c_used+sil_rollout_used,
                                         args.batch_size*sil_ctr,
                                         sil_a3c_used,

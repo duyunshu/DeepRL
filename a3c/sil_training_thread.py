@@ -214,8 +214,6 @@ class SILTrainingThread(CommonWorker):
 
         for _ in range(m):
             self.temp_buffer.reset()
-            print("temp buffer size init: ", len(self.temp_buffer))
-            print("temp buffer max size: ", self.temp_buffer.buff._maxsize)
             s_batch_size, r_batch_size = 0, 0
             if not self.use_rollout: # a3ctbsil
                 s_batch_size = self.batch_size
@@ -244,7 +242,6 @@ class SILTrainingThread(CommonWorker):
                 # update priority of sampled experiences
                 self.update_priorities_once(sess, sil_memory, s_index_list,
                                             s_batch_state, s_action, s_batch_returns)
-                print("added D ",len(s_batch_action))
 
             # take from buffer rollout (new)
             if r_batch_size > 0 and len(rollout_buffer) > r_batch_size:
@@ -259,13 +256,10 @@ class SILTrainingThread(CommonWorker):
                 # update priority of sampled experiences
                 self.update_priorities_once(sess, rollout_buffer, r_index_list,
                                             r_batch_state, r_action, r_batch_returns)
-                print("added R ", len(r_batch_action))
 
-            print("temp buffer size after add: ", len(self.temp_buffer))
             # pick 32 out of mixed (could be 64 or just 32 if no rollout)
             # make sure the temp buffer has been filled
             if len(self.temp_buffer) >= self.batch_size:
-                print("sampled from temp buffer, making sil updates...")
                 sample = self.temp_buffer.sample(self.batch_size, beta=0.4)
                 index_list, batch, weights = sample
                 batch_state, batch_action, batch_returns, \
@@ -338,8 +332,6 @@ class SILTrainingThread(CommonWorker):
                             )
 
                 sil_ctr += 1
-                print("sil_ctr:", sil_ctr)
-                time.sleep(2)
 
         sil_a3c_sampled += (self.batch_size*m - num_rollout_sampled)
         sil_a3c_used += num_a3c_used
