@@ -185,14 +185,7 @@ class SILTrainingThread(CommonWorker):
         self.writer.add_summary(summary, global_t)
         self.writer.flush()
 
-    def sil_train(self, sess, global_t, sil_memory, m, sil_ctr,
-                  sil_a3c_sampled, sil_a3c_used,
-                  sil_a3c_sampled_return, sil_a3c_used_return,
-                  sil_a3c_used_adv,
-                  sil_rollout_sampled, sil_rollout_used,
-                  sil_rollout_sampled_return, sil_rollout_used_return,
-                  sil_rollout_used_adv,
-                  sil_old_sampled, sil_old_used,
+    def sil_train(self, sess, global_t, sil_memory, m,
                   rollout_buffer=None, rollout_sample_proportion=0, stop_rollout=False,
                   roll_any=False):
         """Self-imitation learning process."""
@@ -203,6 +196,12 @@ class SILTrainingThread(CommonWorker):
                                                        self.initial_learning_rate)
         badstate_queue = Queue()
         goodstate_queue = Queue()
+
+        local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used = 0, 0, 0
+        local_sil_a3c_sampled_return, local_sil_a3c_used_return = 0, 0
+        local_sil_a3c_used_adv, local_sil_rollout_sampled, local_sil_rollout_used = 0, 0, 0
+        local_sil_rollout_sampled_return, local_sil_rollout_used_return = 0, 0
+        local_sil_rollout_used_adv, local_sil_old_sampled, local_sil_old_used = 0, 0, 0
 
         total_used = 0
         num_a3c_used = 0
@@ -236,7 +235,7 @@ class SILTrainingThread(CommonWorker):
                 s_batch_state, s_action, s_batch_returns, \
                     s_batch_fullstate, s_batch_rollout, s_batch_refresh = s_batch
                 s_batch_action = convert_onehot_to_a(s_action)
-                sil_a3c_sampled_return += np.sum(s_batch_returns)
+                local_sil_a3c_sampled_return += np.sum(s_batch_returns)
                 self.temp_buffer.extend_one_priority(s_batch_state, s_batch_fullstate,
                     s_batch_action, s_batch_returns, s_batch_rollout, s_batch_refresh)
                 # update priority of sampled experiences
@@ -250,7 +249,7 @@ class SILTrainingThread(CommonWorker):
                 r_batch_state, r_action, r_batch_returns, \
                     r_batch_fullstate, r_batch_rollout, r_batch_refresh = r_batch
                 r_batch_action = convert_onehot_to_a(r_action)
-                sil_rollout_sampled_return += np.sum(r_batch_returns)
+                local_sil_rollout_sampled_return += np.sum(r_batch_returns)
                 self.temp_buffer.extend_one_priority(r_batch_state, r_batch_fullstate,
                     r_batch_action, r_batch_returns, r_batch_rollout, r_batch_refresh)
                 # update priority of sampled experiences
@@ -297,14 +296,14 @@ class SILTrainingThread(CommonWorker):
                 rollout_idx = [i for (i, num) in enumerate(batch_rollout) if num > 0]
                 pos_rollout_idx = np.intersect1d(rollout_idx, pos_idx)
                 if len(pos_rollout_idx) > 0 and len(pos_rollout_idx) == num_rollout_used:
-                    sil_rollout_used_return += np.sum(np.take(batch_returns, pos_rollout_idx))
-                    sil_rollout_used_adv += np.sum(np.take(adv, pos_rollout_idx))
+                    local_sil_rollout_used_return += np.sum(np.take(batch_returns, pos_rollout_idx))
+                    local_sil_rollout_used_adv += np.sum(np.take(adv, pos_rollout_idx))
 
                 a3c_idx = [i for (i, num) in enumerate(batch_rollout) if num <= 0]
                 pos_a3c_idx = np.intersect1d(a3c_idx, pos_idx)
                 if len(pos_a3c_idx) > 0 and len(pos_a3c_idx)==num_a3c_used:
-                    sil_a3c_used_return += np.sum(np.take(batch_returns, pos_a3c_idx))
-                    sil_a3c_used_adv += np.sum(np.take(adv, pos_a3c_idx))
+                    local_sil_a3c_used_return += np.sum(np.take(batch_returns, pos_a3c_idx))
+                    local_sil_a3c_used_adv += np.sum(np.take(adv, pos_a3c_idx))
 
                 # find the index of good samples
                 if self.train_classifier:
@@ -331,22 +330,22 @@ class SILTrainingThread(CommonWorker):
                              )
                             )
 
-                sil_ctr += 1
+                local_sil_ctr += 1
 
-        sil_a3c_sampled += (self.batch_size*m - num_rollout_sampled)
-        sil_a3c_used += num_a3c_used
-        sil_rollout_sampled += num_rollout_sampled
-        sil_rollout_used += num_rollout_used
-        sil_old_sampled += num_old_sampled
-        sil_old_used += num_old_used
+        local_sil_a3c_sampled += (self.batch_size*m - num_rollout_sampled)
+        local_sil_a3c_used += num_a3c_used
+        local_sil_rollout_sampled += num_rollout_sampled
+        local_sil_rollout_used += num_rollout_used
+        local_sil_old_sampled += num_old_sampled
+        local_sil_old_used += num_old_used
 
         # return sil_ctr, total_used, num_a3c_used, num_rollout_sampled, num_rollout_used, \
         #        num_old_sampled, num_old_used, goodstate_queue, badstate_queue
-        return sil_ctr, sil_a3c_sampled, sil_a3c_used, \
-               sil_a3c_sampled_return, sil_a3c_used_return, sil_a3c_used_adv, \
-               sil_rollout_sampled, sil_rollout_used, \
-               sil_rollout_sampled_return, sil_rollout_used_return, sil_rollout_used_adv, \
-               sil_old_sampled, sil_old_used, goodstate_queue, badstate_queue
+        return local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used, \
+               local_sil_a3c_sampled_return, local_sil_a3c_used_return, local_sil_a3c_used_adv, \
+               local_sil_rollout_sampled, local_sil_rollout_used, \
+               local_sil_rollout_sampled_return, local_sil_rollout_used_return, local_sil_rollout_used_adv, \
+               local_sil_old_sampled, local_sil_old_used, goodstate_queue, badstate_queue
 
     def update_priorities_once(self, sess, memory, index_list, batch_state,
         batch_action, batch_returns):

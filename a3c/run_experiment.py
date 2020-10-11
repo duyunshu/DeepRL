@@ -139,6 +139,8 @@ def main():
     parser.set_defaults(test_model=False)
 
     # sil parameters
+    parser.add_argument('--num-sil-worker', type=int, default=1,
+                        help='number of sil workers')
     parser.add_argument('--use-sil', action='store_true',
                         help='self imitation learning loss (SIL)')
     parser.set_defaults(use_sil=False)
@@ -152,6 +154,8 @@ def main():
                         help='The proportion to sample from rollout during sil, range 0-1')
 
     # rollout parameters
+    parser.add_argument('--num-rollout-worker', type=int, default=1,
+                        help='number of rollout workers')
     parser.add_argument('--use-rollout', action='store_true',
                         help='use human model to correct actions')
     parser.set_defaults(use_rollout=False)
@@ -224,6 +228,8 @@ def main():
 
     if args.rollout_sample_proportion is not None:
         assert args.rollout_sample_proportion > 0
+
+    assert args.parallel_size > (args.num_sil_worker + args.num_rollout_worker)
 
     if args.test_model:
         logger.info('Testing A3C model...')

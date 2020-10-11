@@ -47,6 +47,8 @@ def setup_folder(args, env_name):
 
         if args.use_sil:
             end_str += '_sil'
+            if args.num_sil_worker >1 :
+                end_str += str(args.num_sil_worker)+'workers'
             if args.priority_memory:
                 end_str += '_prioritymem'
             if args.use_sil_neg:
@@ -79,13 +81,13 @@ def setup_folder(args, env_name):
             if args.delay_rollout > 0:
                 end_str+='_delayrollout{}'.format(args.delay_rollout)
 
-        if args.rollout_sample_proportion is not None:
+        if args.use_rollout and args.rollout_sample_proportion is not None:
             end_str+='_fixsample'
             end_str+='_D{}-R{}'.format(str(int(10-args.rollout_sample_proportion*10)),
                                        str(int(args.rollout_sample_proportion*10)))
-        else:
-            if args.use_rollout:
-                end_str+='_adptsample'
+        # else:
+        #     if args.use_rollout:
+        #         end_str+='_adptsample'
 
         folder += end_str
 

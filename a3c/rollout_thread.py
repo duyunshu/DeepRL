@@ -51,6 +51,7 @@ class RolloutThread(CommonWorker):
         self.override_num_noops = 0 if self.no_op_max == 0 else None
 
         logger.info("===ROLLOUT thread_index: {}===".format(self.thread_idx))
+        logger.info("device: {}".format(device))
         logger.info("action_size: {}".format(self.action_size))
         logger.info("reward_type: {}".format(self.reward_type))
         logger.info("transformed_bellman: {}".format(
@@ -70,13 +71,13 @@ class RolloutThread(CommonWorker):
             self.local_a3c.prepare_loss(
                 entropy_beta=self.entropy_beta, critic_lr=0.5)
             var_refs = [v._ref() for v in local_vars()]
-            self.gradients = tf.gradients(self.local_a3c.total_loss, var_refs)
+            self.rollout_gradients = tf.gradients(self.local_a3c.total_loss, var_refs)
             global_vars = global_a3c.get_vars
             if self.clip_norm is not None:
-                self.gradients, grad_norm = tf.clip_by_global_norm(
-                    self.gradients, self.clip_norm)
-            self.gradients = list(zip(self.gradients, global_vars()))
-            self.apply_gradients = grad_applier.apply_gradients(self.gradients)
+                self.rollout_gradients, grad_norm = tf.clip_by_global_norm(
+                    self.rollout_gradients, self.clip_norm)
+            self.rollout_gradients = list(zip(self.rollout_gradients, global_vars()))
+            self.rollout_apply_gradients = grad_applier.apply_gradients(self.rollout_gradients)
 
         # setup local pretrained model
         self.local_pretrained = None
@@ -200,7 +201,7 @@ class RolloutThread(CommonWorker):
             self.learning_rate_input: cur_learning_rate,
             }
 
-        sess.run(self.apply_gradients, feed_dict=feed_dict)
+        sess.run(self.rollout_apply_gradients, feed_dict=feed_dict)
 
         return batch_adv
 
