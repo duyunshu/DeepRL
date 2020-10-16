@@ -34,7 +34,8 @@ class SILTrainingThread(CommonWorker):
                  initial_learning_rate, learning_rate_input, grad_applier,
                  device=None, batch_size=None,
                  use_rollout=False, rollout_sample_proportion=None,
-                 train_classifier=False, use_sil_neg=False):
+                 train_classifier=False, use_sil_neg=False,
+                 one_buffer=False):
         """Initialize A3CTrainingThread class."""
         assert self.action_size != -1
 
@@ -47,7 +48,8 @@ class SILTrainingThread(CommonWorker):
         self.use_rollout=use_rollout
         self.train_classifier=train_classifier
         self.use_sil_neg = use_sil_neg
-        # self._device = device
+        self.one_buffer = one_buffer
+        self.rollout_sample_proportion = rollout_sample_proportion
 
         logger.info("===SIL thread_index: {}===".format(self.thread_idx))
         logger.info("device: {}".format(device))
@@ -129,18 +131,20 @@ class SILTrainingThread(CommonWorker):
             phi_length=self.local_net.in_shape[2],
             reward_constant=self.reward_constant)
 
-        # init temp buffer
-        if not self.use_rollout or rollout_sample_proportion is not None:
-            max_len = self.batch_size
-        else:
-            max_len = self.batch_size*2
-        self.temp_buffer = SILReplayMemory(
-            self.action_size, max_len=max_len, gamma=self.gamma,
-            clip=reward_clipped,
-            height=self.local_net.in_shape[0],
-            width=self.local_net.in_shape[1],
-            phi_length=self.local_net.in_shape[2],priority=True,
-            reward_constant=self.reward_constant)
+        # if not self.use_rollout or rollout_sample_proportion is not None:
+        #     max_len = self.batch_size
+        # else:
+        #     max_len = self.batch_size*2
+        # init temp buffer, only use temp_buffer in Lider adaptive sampling
+        self.temp_buffer = None
+        if (self.use_rollout) and (not self.one_buffer) and (self.rollout_sample_proportion is None):
+            self.temp_buffer = SILReplayMemory(
+                self.action_size, max_len=self.batch_size*2, gamma=self.gamma,
+                clip=reward_clipped,
+                height=self.local_net.in_shape[0],
+                width=self.local_net.in_shape[1],
+                phi_length=self.local_net.in_shape[2],priority=True,
+                reward_constant=self.reward_constant)
 
         with tf.device(device):
             if self.use_grad_cam:
@@ -185,9 +189,25 @@ class SILTrainingThread(CommonWorker):
         self.writer.add_summary(summary, global_t)
         self.writer.flush()
 
+    def _extend_batches(batches, extend_batches):
+        batch_state, batch_action, batch_returns, \
+            batch_fullstate, batch_rollout, batch_refresh = batches
+
+        state, action, returns, \
+            fullstate, rollout, refresh = extend_batches
+
+        batch_state.extend(state)
+        batch_action.extend(action)
+        batch_returns.extend(returns)
+        batch_fullstate.extend(fullstate)
+        batch_rollout.extend(rollout)
+        batch_refresh.extend(refresh)
+
+        return (batch_state, batch_action, batch_returns,
+                batch_fullstate, batch_rollout, batch_refresh)
+
     def sil_train(self, sess, global_t, sil_memory, m,
-                  rollout_buffer=None, rollout_sample_proportion=0, stop_rollout=False,
-                  roll_any=False):
+                  rollout_buffer=None, stop_rollout=False, roll_any=False):
         """Self-imitation learning process."""
 
         # copy weights from shared to local
@@ -212,62 +232,93 @@ class SILTrainingThread(CommonWorker):
         num_old_used = 0
 
         for _ in range(m):
-            self.temp_buffer.reset()
             s_batch_size, r_batch_size = 0, 0
-            if not self.use_rollout: # a3ctbsil
+            # a3ctbsil
+            if not self.use_rollout:
                 s_batch_size = self.batch_size
+            # or LiDER-OneBuffer
+            elif self.use_rollout and self.one_buffer:
+                s_batch_size = self.batch_size
+            # LiDER
             else:
                 assert rollout_buffer is not None
-                # adaptive sampling ratio
-                if rollout_sample_proportion is None:
+                # adaptive sampling ratios
+                if self.rollout_sample_proportion is None:
+                    assert self.temp_buffer is not None
+                    self.temp_buffer.reset()
                     s_batch_size = self.batch_size
                     r_batch_size = self.batch_size
                 # fixed sampling ratio
                 else:
-                    assert rollout_sample_proportion > 0 # rollout proportion=0 is actually just a3tbsil
-                    s_batch_size = round(self.batch_size * (1 - rollout_sample_proportion))
-                    r_batch_size = round(self.batch_size * rollout_sample_proportion)
+                    assert self.rollout_sample_proportion > 0 # rollout proportion=0 is actually just a3tbsil
+                    s_batch_size = round(self.batch_size * (1 - self.rollout_sample_proportion))
+                    r_batch_size = round(self.batch_size * self.rollout_sample_proportion)
 
-            # take from buffer a3c (old)
+            batch_state, batch_action, batch_returns, batch_fullstate, \
+                batch_rollout, batch_refresh, weights = ([] for i in range(7))
+
+            # take from buffer a3c
             if s_batch_size > 0 and len(sil_memory) > s_batch_size:
                 s_sample = sil_memory.sample(s_batch_size , beta=0.4)
                 s_index_list, s_batch, s_weights = s_sample
                 s_batch_state, s_action, s_batch_returns, \
                     s_batch_fullstate, s_batch_rollout, s_batch_refresh = s_batch
-                s_batch_action = convert_onehot_to_a(s_action)
                 local_sil_a3c_sampled_return += np.sum(s_batch_returns)
-                self.temp_buffer.extend_one_priority(s_batch_state, s_batch_fullstate,
-                    s_batch_action, s_batch_returns, s_batch_rollout, s_batch_refresh)
                 # update priority of sampled experiences
                 self.update_priorities_once(sess, sil_memory, s_index_list,
                                             s_batch_state, s_action, s_batch_returns)
+                if self.temp_buffer is not None:
+                    s_batch_action = convert_onehot_to_a(s_action)
+                    self.temp_buffer.extend_one_priority(s_batch_state, s_batch_fullstate,
+                        s_batch_action, s_batch_returns, s_batch_rollout, s_batch_refresh)
+                else:
+                    batch_state.extend(s_batch_state)
+                    batch_action.extend(s_action)
+                    batch_returns.extend(s_batch_returns)
+                    batch_fullstate.extend(s_batch_fullstate)
+                    batch_rollout.extend(s_batch_rollout)
+                    batch_refresh.extend(s_batch_refresh)
+                    weights.extend(s_weights)
 
-            # take from buffer rollout (new)
+            # take from buffer rollout
             if r_batch_size > 0 and len(rollout_buffer) > r_batch_size:
                 r_sample = rollout_buffer.sample(r_batch_size, beta=0.4)
                 r_index_list, r_batch, r_weights = r_sample
                 r_batch_state, r_action, r_batch_returns, \
                     r_batch_fullstate, r_batch_rollout, r_batch_refresh = r_batch
-                r_batch_action = convert_onehot_to_a(r_action)
                 local_sil_rollout_sampled_return += np.sum(r_batch_returns)
-                self.temp_buffer.extend_one_priority(r_batch_state, r_batch_fullstate,
-                    r_batch_action, r_batch_returns, r_batch_rollout, r_batch_refresh)
                 # update priority of sampled experiences
                 self.update_priorities_once(sess, rollout_buffer, r_index_list,
                                             r_batch_state, r_action, r_batch_returns)
+                if self.temp_buffer is not None:
+                    r_batch_action = convert_onehot_to_a(r_action)
+                    self.temp_buffer.extend_one_priority(r_batch_state, r_batch_fullstate,
+                        r_batch_action, r_batch_returns, r_batch_rollout, r_batch_refresh)
+                else:
+                    batch_state.extend(r_batch_state)
+                    batch_action.extend(r_action)
+                    batch_returns.extend(r_batch_returns)
+                    batch_fullstate.extend(r_batch_fullstate)
+                    batch_rollout.extend(r_batch_rollout)
+                    batch_refresh.extend(r_batch_refresh)
+                    weights.extend(r_weights)
 
-            # pick 32 out of mixed (could be 64 or just 32 if no rollout)
+            # LiDER only: pick 32 out of mixed
+            # (at the beginning 32 could all be a3c since rollout has no data yet)
             # make sure the temp buffer has been filled
-            if len(self.temp_buffer) >= self.batch_size:
+            if self.temp_buffer is not None and len(self.temp_buffer) >= self.batch_size:
                 sample = self.temp_buffer.sample(self.batch_size, beta=0.4)
                 index_list, batch, weights = sample
                 batch_state, batch_action, batch_returns, \
                     batch_fullstate, batch_rollout, batch_refresh = batch
 
-                if self.use_rollout:
-                    num_rollout_sampled += np.sum(batch_rollout)
-                    num_old_sampled += np.sum(batch_refresh)
+            if self.use_rollout:
+                num_rollout_sampled += np.sum(batch_rollout)
+                num_old_sampled += np.sum(batch_refresh)
 
+            # sil policy update (if one full batch sampled)
+            # this control is mostly for rollout because rollout buffer takes time to fill)
+            if len(batch_state) == self.batch_size:
                 feed_dict = {
                     self.local_net.s: batch_state,
                     self.local_net.a_sil: batch_action,
@@ -339,8 +390,6 @@ class SILTrainingThread(CommonWorker):
         local_sil_old_sampled += num_old_sampled
         local_sil_old_used += num_old_used
 
-        # return sil_ctr, total_used, num_a3c_used, num_rollout_sampled, num_rollout_used, \
-        #        num_old_sampled, num_old_used, goodstate_queue, badstate_queue
         return local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used, \
                local_sil_a3c_sampled_return, local_sil_a3c_used_return, local_sil_a3c_used_adv, \
                local_sil_rollout_sampled, local_sil_rollout_used, \
@@ -361,24 +410,3 @@ class SILTrainingThread(CommonWorker):
         fetch = self.local_net.clipped_advs
         adv_clip = sess.run(fetch, feed_dict=feed_dict)
         memory.set_weights(index_list, adv_clip)
-
-
-    def sil_update_priorities(self, sess, sil_memory, m=4):
-        """Self-imitation update priorities."""
-        # copy weights from shared to local
-        sess.run(self.sync)
-
-        # start_time = time.time()
-        for _ in range(m):
-            sample = sil_memory.sample(self.batch_size, beta=0.4)
-            index_list, batch, _ = sample
-            batch_state, batch_action, batch_returns, batch_fullstate = batch
-
-            feed_dict = {
-                self.local_net.s: batch_state,
-                self.local_net.a_sil: batch_action,
-                self.local_net.returns: batch_returns,
-                }
-            fetch = self.local_net.clipped_advs
-            adv = sess.run(fetch, feed_dict=feed_dict)
-            sil_memory.set_weights(index_list, adv)

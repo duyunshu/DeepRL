@@ -327,7 +327,8 @@ def run_a3c(args):
                 use_rollout=args.use_rollout,
                 rollout_sample_proportion=args.rollout_sample_proportion,
                 train_classifier=args.train_classifier,
-                use_sil_neg=args.use_sil_neg)
+                use_sil_neg=args.use_sil_neg,
+                one_buffer=args.one_buffer)
 
             all_workers.append(sil_worker)
             startIndex += 1
@@ -581,6 +582,8 @@ def run_a3c(args):
         # prepare_dir(folder / 'rollout', empty=True)
 
     lock = threading.Lock()
+    sil_lock = threading.Lock()
+    rollout_lock = threading.Lock()
 
     def next_t(current_t, freq):
         return np.ceil((current_t + 0.00001) / freq) * freq
@@ -594,16 +597,16 @@ def run_a3c(args):
     # last_temp_global_t = global_t
     # ispretrain_markers = [False] * args.parallel_size
 
-    rollout_sample_proportion = args.rollout_sample_proportion
+    # rollout_sample_proportion = args.rollout_sample_proportion
     _stop_rollout = False
     last_reward = -(sys.maxsize)
     class_last_reward = -(sys.maxsize)
 
     def train_function(parallel_idx, th_ctr, ep_queue, net_updates, class_updates, goodstate_queue, badstate_queue, badstate_list, th_sil_ctr):
-        nonlocal global_t, step_t, rewards, class_rewards, lock, \
+        nonlocal global_t, step_t, rewards, class_rewards, lock, sil_lock, rollout_lock, \
                  next_save_t, next_global_t, a3clog
         nonlocal shared_memory, exp_buffer, rollout_buffer
-        nonlocal rollout_sample_proportion, _stop_rollout, last_reward, class_last_reward
+        nonlocal _stop_rollout, last_reward, class_last_reward #rollout_sample_proportion,
         nonlocal sil_dict, sil_ctr, sil_a3c_sampled, sil_a3c_used, \
                  sil_a3c_sampled_return, sil_a3c_used_return, sil_a3c_used_adv,\
                  sil_rollout_sampled, sil_rollout_used, \
@@ -800,7 +803,7 @@ def run_a3c(args):
                     th_sil_ctr.get()
 
                     if args.stop_rollout and class_last_reward <= last_reward:
-                        rollout_sample_proportion = 0
+                        # rollout_sample_proportion = 0
                         _stop_rollout = True
 
                     train_out = parallel_worker.sil_train(
@@ -814,7 +817,7 @@ def run_a3c(args):
                         # sil_rollout_used_adv,
                         # sil_old_sampled, sil_old_used,
                         rollout_buffer=rollout_buffer,
-                        rollout_sample_proportion=rollout_sample_proportion,
+                        # rollout_sample_proportion=rollout_sample_proportion,
                         stop_rollout=_stop_rollout,
                         roll_any=args.roll_any)
 
@@ -866,7 +869,7 @@ def run_a3c(args):
                         #                       bads=badstate_queue.qsize(),
                         #                       global_t=global_t)
 
-                        if sil_ctr % (args.num_sil_worker*100) == 0 and sil_ctr > 0:
+                        if sil_ctr % (args.num_sil_worker*100) <= 3 and sil_ctr > 0:
                             rollout_buffsize = 0
                             if not args.one_buffer:
                                 rollout_buffsize = len(rollout_buffer)
@@ -932,7 +935,7 @@ def run_a3c(args):
                 # with more SIL workers, waiting too long could result in SIL updating with too much old mem
                 max = args.parallel_size - (args.num_sil_worker + args.num_rollout_worker)# args.parallel_size
                 if args.num_sil_worker > 1:
-                    with lock: # when milti SIL, make sure only one is adding at a time
+                    with sil_lock: # when milti SIL, make sure only one is adding at a time
                         if ep_queue.qsize() >= max:
                             while th_sil_ctr.qsize() < args.num_sil_worker:
                                 time.sleep(0.001)
@@ -955,6 +958,19 @@ def run_a3c(args):
                         # This ensures that SIL has a chance to train
                         if max <= 0:
                             break
+                    sil_ctr += local_sil_ctr
+                    sil_a3c_sampled += local_sil_a3c_sampled
+                    sil_a3c_used += local_sil_a3c_used
+                    sil_a3c_sampled_return += local_sil_a3c_sampled_return
+                    sil_a3c_used_return += local_sil_a3c_used_return
+                    sil_a3c_used_adv += local_sil_a3c_used_adv
+                    sil_rollout_sampled += local_sil_rollout_sampled
+                    sil_rollout_used += local_sil_rollout_used
+                    sil_rollout_sampled_return += local_sil_rollout_sampled_return
+                    sil_rollout_used_return += local_sil_rollout_used_return
+                    sil_rollout_used_adv += local_sil_rollout_used_adv
+                    sil_old_sampled += local_sil_old_sampled
+                    sil_old_used += local_sil_old_used
 
                 # # at sil_interval=0, this will never be executed,
                 # # this is considered fast SIL (no intervals between updates)
@@ -1103,19 +1119,19 @@ def run_a3c(args):
                 a3c_sample_used_return += local_a3c_sample_used_return
                 a3c_sample_used_adv += local_a3c_sample_used_adv
 
-                sil_ctr += local_sil_ctr
-                sil_a3c_sampled += local_sil_a3c_sampled
-                sil_a3c_used += local_sil_a3c_used
-                sil_a3c_sampled_return += local_sil_a3c_sampled_return
-                sil_a3c_used_return += local_sil_a3c_used_return
-                sil_a3c_used_adv += local_sil_a3c_used_adv
-                sil_rollout_sampled += local_sil_rollout_sampled
-                sil_rollout_used += local_sil_rollout_used
-                sil_rollout_sampled_return += local_sil_rollout_sampled_return
-                sil_rollout_used_return += local_sil_rollout_used_return
-                sil_rollout_used_adv += local_sil_rollout_used_adv
-                sil_old_sampled += local_sil_old_sampled
-                sil_old_used += local_sil_old_used
+                # sil_ctr += local_sil_ctr
+                # sil_a3c_sampled += local_sil_a3c_sampled
+                # sil_a3c_used += local_sil_a3c_used
+                # sil_a3c_sampled_return += local_sil_a3c_sampled_return
+                # sil_a3c_used_return += local_sil_a3c_used_return
+                # sil_a3c_used_adv += local_sil_a3c_used_adv
+                # sil_rollout_sampled += local_sil_rollout_sampled
+                # sil_rollout_used += local_sil_rollout_used
+                # sil_rollout_sampled_return += local_sil_rollout_sampled_return
+                # sil_rollout_used_return += local_sil_rollout_used_return
+                # sil_rollout_used_adv += local_sil_rollout_used_adv
+                # sil_old_sampled += local_sil_old_sampled
+                # sil_old_used += local_sil_old_used
 
                 # if during a thread's update, global_t has reached a evaluation interval
                 if global_t > next_global_t:
