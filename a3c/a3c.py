@@ -756,36 +756,6 @@ def run_a3c(args):
                 return
 
             if global_t >= (args.max_time_step * args.max_time_step_fraction):
-                file = folder / "Worker_info.txt"
-                f = open(str(file), 'a+')
-
-                if parallel_worker.is_sil_thread:
-                    message = "===SIL: total # of updates: {}\n".format(sil_ctr)+ \
-                              "total # a3c samples used for update: {}\n".format(sil_a3c_used)+ \
-                              "total # rollout samples used for update: {}\n".format(sil_rollout_used)
-                    print(message)
-                    f.write(message)
-                elif parallel_worker.is_rollout_thread:
-                    message = "===Rollout: total # of rollouts: {}\n".format(rollout_ctr)+ \
-                              "successful (i.e., # rollout updates): {}\n ".format(rollout_added_ctr)+ \
-                              "successful rate: {:.2f}\n".format(rollout_added_ctr / rollout_ctr)+ \
-                              "total # of samples used for rollout updates: {}\n".format(rollout_sample_used)+ \
-                              "avg rollout new return: {}\n".format((rollout_new_return / rollout_added_ctr))+ \
-                              "avg old return: {}\n".format(rollout_old_return / rollout_added_ctr)+ \
-                              "rollout steps: {}\n".format(rollout_steps)
-                    print(message)
-                    f.write(message)
-                elif parallel_worker.is_classify_thread:
-                    message = "===Classification: # of updates: {}\n".format(classify_ctr)
-                    logger.info(message)
-                    f.write(message)
-                else:
-                    if a3clog == False:
-                        message = "===A3C: total # of updates: {}\n".format(a3c_ctr)
-                        print(message)
-                        f.write(message)
-                        a3clog=True
-                f.close()
                 return
 
             if parallel_worker.is_sil_thread:
@@ -833,7 +803,6 @@ def run_a3c(args):
 
                     th_sil_ctr.put(1)
                     th_ctr.put(1)
-                    time.sleep(2)
 
                     with net_updates.mutex:
                         net_updates.queue.clear()
@@ -915,7 +884,7 @@ def run_a3c(args):
                         #                            rollout_sampled=sil_rollout_sampled,
                         #                            rollout_used=sil_rollout_used,
                         #                            global_t=global_t)
-                        if sil_ctr % (args.num_sil_worker*100) == 0 and sil_ctr > 0:
+                        if sil_ctr % (args.num_sil_worker*100) <= 3 and sil_ctr > 0:
                             log_data = (sil_ctr, sil_a3c_used+sil_rollout_used,
                                         args.batch_size*sil_ctr,
                                         sil_a3c_used,
@@ -938,29 +907,25 @@ def run_a3c(args):
                 # wait for #a3c worker episodes, so that we don't need to pause at every step
                 # but we don't want to wait for too long either
                 # with more SIL workers, waiting too long could result in SIL updating with too much old mem
-                max = args.parallel_size - (args.num_sil_worker + args.num_rollout_worker)
-                if args.num_sil_worker > 1:
-                    with sil_lock: # when milti SIL, make sure only one is adding at a time
-                        q_size = ep_queue.qsize()
-                        if q_size >= max: #max:
-                            # only allow one thread to add at a time
-                            # print("current sil thread ", parallel_worker.thread_idx)
+                max = args.parallel_size - args.num_sil_worker # + args.num_rollout_worker)
+                q_size = ep_queue.qsize()
+                if args.num_sil_worker > 1: # when milti SIL, make sure only one is adding at a time
+                    if q_size >= max:
+                        with sil_lock:
+                            # only allow one thread to add to shared_memory
                             if parallel_worker.thread_idx == sil_addmem_thread:
                                 # wait for every thread done training
                                 while th_sil_ctr.qsize() < args.num_sil_worker:
-                                    # print("th_sil_ctr waiting: ", th_sil_ctr.qsize())
-                                    time.sleep(0.01)
+                                    time.sleep(0.001)
                                 while not ep_queue.empty():
                                     data = ep_queue.get()
                                     parallel_worker.episode.set_data(*data)
                                     shared_memory.extend(parallel_worker.episode)
                                     parallel_worker.episode.reset()
-                                    max -= 1
-                                    # This ensures that SIL has a chance to train
-                                    if max <= 0:
+                                    q_size -= 1
+                                    # This ensures SIL doesn't addmem non-stop and has a chance to train
+                                    if q_size <= 0:
                                         break
-                                # print("added by thread ", parallel_worker.thread_idx)
-                                # time.sleep(1)
                 else: # single SIL doesn't need to wait
                     while not ep_queue.empty():
                         data = ep_queue.get()
@@ -971,19 +936,6 @@ def run_a3c(args):
                         # This ensures that SIL has a chance to train
                         if max <= 0:
                             break
-                    # sil_ctr += local_sil_ctr
-                    # sil_a3c_sampled += local_sil_a3c_sampled
-                    # sil_a3c_used += local_sil_a3c_used
-                    # sil_a3c_sampled_return += local_sil_a3c_sampled_return
-                    # sil_a3c_used_return += local_sil_a3c_used_return
-                    # sil_a3c_used_adv += local_sil_a3c_used_adv
-                    # sil_rollout_sampled += local_sil_rollout_sampled
-                    # sil_rollout_used += local_sil_rollout_used
-                    # sil_rollout_sampled_return += local_sil_rollout_sampled_return
-                    # sil_rollout_used_return += local_sil_rollout_used_return
-                    # sil_rollout_used_adv += local_sil_rollout_used_adv
-                    # sil_old_sampled += local_sil_old_sampled
-                    # sil_old_used += local_sil_old_used
 
                 # # at sil_interval=0, this will never be executed,
                 # # this is considered fast SIL (no intervals between updates)
@@ -1042,9 +994,9 @@ def run_a3c(args):
                     if part_end and add:
                         if not args.one_buffer:
                             rollout_buffer.extend(parallel_worker.episode)
-                        else: # TODO: should not mess with SIL's index, just add to ep_queue
-                            shared_memory.extend(parallel_worker.episode)
-                            # ep_queue.put(parallel_worker.episode.get_data())
+                        else: # 10/16 fix: should not mess with SIL's index, just add to ep_queue
+                            # shared_memory.extend(parallel_worker.episode)
+                            ep_queue.put(parallel_worker.episode.get_data())
 
                     parallel_worker.episode.reset()
 
@@ -1159,8 +1111,8 @@ def run_a3c(args):
                     # wait 1 hour max for all threads to finish before testing
                     time_waited = 0
                     while not stop_req and th_ctr.qsize() < len(all_workers):
-                        time.sleep(0.01)
-                        time_waited += 0.01
+                        time.sleep(0.001)
+                        time_waited += 0.001
                         if time_waited > 3600:
                             sys.exit('Exceed waiting time, exiting...')
 
