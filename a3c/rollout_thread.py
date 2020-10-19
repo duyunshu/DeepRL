@@ -206,8 +206,8 @@ class RolloutThread(CommonWorker):
         return batch_adv
 
     def rollout(self, a3c_sess, folder, pretrain_sess, game, global_t, badstate,
-                rollout_ctr, rollout_added_ctr, rollout_sample_used, rollout_sample_used_adv,
-                rollout_new_return, rollout_old_return,
+                # rollout_ctr, rollout_added_ctr, rollout_sample_used, rollout_sample_used_adv,
+                # rollout_new_return, rollout_old_return,
                 add_all_rollout, ep_max_steps, nstep_bc, update_in_rollout):
         """Rollout, one at a time."""
         a3c_sess.run(self.sync_a3c)
@@ -226,6 +226,11 @@ class RolloutThread(CommonWorker):
         values = []
         terminals = []
         confidences = []
+
+        rollout_ctr, rollout_added_ctr = 0, 0
+        rollout_sample_used, rollout_sample_used_adv = 0, 0
+        rollout_new_return, rollout_old_return = 0, 0
+        rollout_steps = 0
 
         terminal_pseudo = False  # loss of life
         terminal_end = False  # real terminal
@@ -316,17 +321,18 @@ class RolloutThread(CommonWorker):
                 name = 'EpisodicLifeEnv'
                 rollout_ctr += 1
                 terminal_end = get_wrapper_by_name(env, name).was_real_done
-                if rollout_ctr % 10 == 0 and rollout_ctr > 0:
-                    log_msg = "ROLLOUT: rollout_ctr={} added_rollout_ct={} worker={} global_t={} local_t={}".format(
-                        rollout_ctr, rollout_added_ctr, self.thread_idx, global_t, self.local_t)
-                    score_str = colored("score={}".format(
-                        self.episode_reward), "magenta")
-                    steps_str = colored("steps={}".format(
-                        self.episode_steps), "blue")
-                    conf_str = colored("advice-confidence={}".format(
-                        np.mean(confidences)), "blue")
-                    log_msg += " {} {} {}".format(score_str, steps_str, conf_str)
-                    logger.info(log_msg)
+                # # move to main thread
+                # if rollout_ctr % 10 == 0 and rollout_ctr > 0:
+                #     log_msg = "ROLLOUT: rollout_ctr={} added_rollout_ct={} worker={} global_t={} local_t={}".format(
+                #         rollout_ctr, rollout_added_ctr, self.thread_idx, global_t, self.local_t)
+                #     score_str = colored("score={}".format(
+                #         self.episode_reward), "magenta")
+                #     steps_str = colored("steps={}".format(
+                #         self.episode_steps), "blue")
+                #     conf_str = colored("advice-confidence={}".format(
+                #         np.mean(confidences)), "blue")
+                #     log_msg += " {} {} {}".format(score_str, steps_str, conf_str)
+                #     logger.info(log_msg)
 
                 new_return = self.compute_return_for_state(rewards, terminals)
                 # print("new&old returns: ",new_return, old_return)
@@ -346,7 +352,7 @@ class RolloutThread(CommonWorker):
                     rollout_old_return += old_return
                     # update policy immediate using a good rollout
                     if update_in_rollout:
-                        logger.info("Update A3C using rollout data")
+                        # logger.info("Update A3C using rollout data")
                         batch_adv = self.update_a3c(a3c_sess, actions, states, rewards, values, global_t)
                         rollout_sample_used += len(actions)
                         rollout_sample_used_adv += np.sum(batch_adv)
@@ -369,13 +375,14 @@ class RolloutThread(CommonWorker):
                 #                salience=False)
                 # del video_buffer
 
-                self.record_rollout(
-                    score=self.episode_reward, steps=self.episode_steps,
-                    old_return=old_return, new_return=new_return,
-                    global_t=global_t, rollout_ctr=rollout_ctr,
-                    rollout_added_ctr=rollout_added_ctr,
-                    mode='Rollout',
-                    confidence=np.mean(confidences), episodes=None)
+                # not recording to save some time
+                # self.record_rollout(
+                #     score=self.episode_reward, steps=self.episode_steps,
+                #     old_return=old_return, new_return=new_return,
+                #     global_t=global_t, rollout_ctr=rollout_ctr,
+                #     rollout_added_ctr=rollout_added_ctr,
+                #     mode='Rollout',
+                #     confidence=np.mean(confidences), episodes=None)
 
                 self.episode_reward = 0
                 self.episode_steps = 0

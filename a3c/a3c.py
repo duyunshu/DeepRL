@@ -337,8 +337,10 @@ def run_a3c(args):
 
     # setup rollout worker
     rollout_worker = None
+    rollout_addmem_thread = -1
     if args.use_rollout:
         _device = "/gpu:0" if (args.use_gpu and args.num_rollout_worker==1) else device
+        rollout_addmem_thread = startIndex
         for i in range(args.num_rollout_worker):
             rollout_network = GameACFFNetwork(
                 action_size, startIndex, device=_device, #"/gpu:0" if args.use_gpu else device,
@@ -606,7 +608,7 @@ def run_a3c(args):
 
     def train_function(parallel_idx, th_ctr, ep_queue, net_updates, class_updates, \
                        goodstate_queue, badstate_queue, badstate_list, \
-                       th_sil_ctr):
+                       th_sil_ctr, rollout_ep_queue):
         nonlocal global_t, step_t, rewards, class_rewards, lock, sil_lock, rollout_lock, \
                  next_save_t, next_global_t, a3clog
         nonlocal shared_memory, exp_buffer, rollout_buffer
@@ -759,6 +761,13 @@ def run_a3c(args):
                 return
 
             if parallel_worker.is_sil_thread:
+                # before sil starts, init local count
+                local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used = 0, 0, 0
+                local_sil_a3c_sampled_return, local_sil_a3c_used_return = 0, 0
+                local_sil_a3c_used_adv, local_sil_rollout_sampled, local_sil_rollout_used = 0, 0, 0
+                local_sil_rollout_sampled_return, local_sil_rollout_used_return = 0, 0
+                local_sil_rollout_used_adv, local_sil_old_sampled, local_sil_old_used = 0, 0, 0
+
                 if args.use_sil_skip:
                     if net_updates.qsize() >= sil_interval \
                        and len(shared_memory) >= min_mem \
@@ -771,14 +780,15 @@ def run_a3c(args):
 
                 if sil_train_flag:
                     sil_train_flag = False
-                    th_ctr.get()
-                    # when multiSIL, all SIL threads need to be done with training before adding ep
-                    # otherwise, mess up with priority update in shared_memory
-                    th_sil_ctr.get()
 
                     if args.stop_rollout and class_last_reward <= last_reward:
                         # rollout_sample_proportion = 0
                         _stop_rollout = True
+
+                    th_ctr.get()
+                    # when multiSIL, all SIL threads need to be done with training before adding ep
+                    # otherwise, mess up with priority update in shared_memory
+                    th_sil_ctr.get()
 
                     train_out = parallel_worker.sil_train(
                         sess, global_t, shared_memory, m_repeat,
@@ -803,6 +813,13 @@ def run_a3c(args):
 
                     th_sil_ctr.put(1)
                     th_ctr.put(1)
+
+
+                    # add some waiting time to prevent thread racing
+                    # this might reduce the number of sil updates tho
+                    # the time used here is a rough balance to achieve min(wall time) and max(sil updates)
+                    if args.num_sil_worker > 1:
+                        time.sleep(0.5)
 
                     with net_updates.mutex:
                         net_updates.queue.clear()
@@ -893,12 +910,6 @@ def run_a3c(args):
                                         " total_sample_used={1:}/{2:}"
                                         " a3c_used={3:}"
                                         " sil_memory_size={4:}".format(*log_data))
-                else: # before sil starts, init local count
-                    local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used = 0, 0, 0
-                    local_sil_a3c_sampled_return, local_sil_a3c_used_return = 0, 0
-                    local_sil_a3c_used_adv, local_sil_rollout_sampled, local_sil_rollout_used = 0, 0, 0
-                    local_sil_rollout_sampled_return, local_sil_rollout_used_return = 0, 0
-                    local_sil_rollout_used_adv, local_sil_old_sampled, local_sil_old_used = 0, 0, 0
 
                 # Adding episodes to SIL memory is centralize to ensure
                 # sampling and updating of priorities does not become a problem
@@ -909,6 +920,11 @@ def run_a3c(args):
                 # with more SIL workers, waiting too long could result in SIL updating with too much old mem
                 max = args.parallel_size - args.num_sil_worker # + args.num_rollout_worker)
                 q_size = ep_queue.qsize()
+                # for multi rollout worker
+                rollout_qsize = -1
+                if rollout_ep_queue is not None:
+                    rollout_qsize = rollout_ep_queue.qsize()
+
                 if args.num_sil_worker > 1: # when milti SIL, make sure only one is adding at a time
                     if q_size >= max:
                         with sil_lock:
@@ -916,7 +932,7 @@ def run_a3c(args):
                             if parallel_worker.thread_idx == sil_addmem_thread:
                                 # wait for every thread done training
                                 while th_sil_ctr.qsize() < args.num_sil_worker:
-                                    time.sleep(0.001)
+                                    time.sleep(0.01)
                                 while not ep_queue.empty():
                                     data = ep_queue.get()
                                     parallel_worker.episode.set_data(*data)
@@ -926,6 +942,18 @@ def run_a3c(args):
                                     # This ensures SIL doesn't addmem non-stop and has a chance to train
                                     if q_size <= 0:
                                         break
+                                # for multi rollout worker
+                                if rollout_qsize > 0:
+                                    while not rollout_ep_queue.empty():
+                                        data = rollout_ep_queue.get()
+                                        parallel_worker.episode.set_data(*data)
+                                        rollout_buffer.extend(parallel_worker.episode)
+                                        parallel_worker.episode.reset()
+                                        rollout_qsize -= 1
+                                        # This ensures SIL doesn't addmem non-stop and has a chance to train
+                                        if rollout_qsize <= 0:
+                                            break
+
                 else: # single SIL doesn't need to wait
                     while not ep_queue.empty():
                         data = ep_queue.get()
@@ -936,6 +964,17 @@ def run_a3c(args):
                         # This ensures that SIL has a chance to train
                         if max <= 0:
                             break
+                    # for multi rollout worker
+                    if rollout_qsize > 0:
+                        while not rollout_ep_queue.empty():
+                            data = rollout_ep_queue.get()
+                            parallel_worker.episode.set_data(*data)
+                            rollout_buffer.extend(parallel_worker.episode)
+                            parallel_worker.episode.reset()
+                            rollout_qsize -= 1
+                            # This ensures SIL doesn't addmem non-stop and has a chance to train
+                            if rollout_qsize <= 0:
+                                break
 
                 # # at sil_interval=0, this will never be executed,
                 # # this is considered fast SIL (no intervals between updates)
@@ -945,20 +984,30 @@ def run_a3c(args):
                 #         sess, shared_memory, m=m_repeat)
 
                 diff_global_t = 0
-                # for centralized A3C counting
+                # centralized A3C counting
                 local_a3c_ctr = 0
                 local_a3c_sample_used = 0
                 local_a3c_sample_used_return = 0
                 local_a3c_sample_used_adv = 0
+                # centralized rollout counting
+                local_rollout_ctr, local_rollout_added_ctr = 0, 0
+                local_rollout_sample_used, local_rollout_sample_used_adv = 0, 0
+                local_rollout_new_return, local_rollout_old_return = 0, 0
+                local_rollout_steps = 0
 
 
             elif parallel_worker.is_rollout_thread:
-                th_ctr.get()
                 diff_global_t = 0
+                local_rollout_ctr, local_rollout_added_ctr = 0, 0
+                local_rollout_sample_used, local_rollout_sample_used_adv = 0, 0
+                local_rollout_new_return, local_rollout_old_return = 0, 0
+                local_rollout_steps = 0
 
                 if global_t < args.advice_budget and \
                    global_t > (args.delay_rollout*args.eval_freq) and \
                    len(shared_memory) >= 1: # rollout_sample_proportion > 0 and \
+
+                    th_ctr.get()
 
                     if not args.roll_any:
                         _, _, sample = badstate_queue.get()
@@ -969,50 +1018,63 @@ def run_a3c(args):
 
                     train_out = parallel_worker.rollout(sess, folder, pretrain_sess,
                                                    GAME_NAME, global_t, sample,
-                                                   rollout_ctr, rollout_added_ctr,
-                                                   rollout_sample_used,
-                                                   rollout_sample_used_adv,
-                                                   rollout_new_return,
-                                                   rollout_old_return,
+                                                   # rollout_ctr, rollout_added_ctr,
+                                                   # rollout_sample_used,
+                                                   # rollout_sample_used_adv,
+                                                   # rollout_new_return,
+                                                   # rollout_old_return,
                                                    args.add_all_rollout,
                                                    args.max_ep_step,
                                                    args.nstep_bc,
                                                    args.update_in_rollout)
 
-                    diff_global_t, episode_end, part_end, rollout_ctr, \
-                        rollout_added_ctr, add, rollout_sample_used, rollout_sample_used_adv, \
-                        rollout_new_return, rollout_old_return= train_out
+                    diff_global_t, episode_end, part_end, local_rollout_ctr, \
+                        local_rollout_added_ctr, add, local_rollout_sample_used, \
+                        local_rollout_sample_used_adv, \
+                        local_rollout_new_return, local_rollout_old_return= train_out
 
-                    rollout_steps += diff_global_t
+                    th_ctr.put(1)
 
-                    if rollout_ctr % 10 == 0 and rollout_ctr > 0:
+                    local_rollout_steps += diff_global_t
+
+                    if rollout_ctr % (args.num_rollout_worker*10) == 0 and rollout_ctr > 0:
                         logger.info("ROLLOUT total steps: {}".format(rollout_steps))
                         logger.info("A3C total steps: {}".format(global_t - rollout_steps))
+                        log_msg = "ROLLOUT: rollout_ctr={} added_rollout_ct={} worker={}".format(
+                        rollout_ctr, rollout_added_ctr, parallel_worker.thread_idx)
+                        logger.info(log_msg)
 
                     # should always part_end,
                     # and only add if new return is better
                     if part_end and add:
                         if not args.one_buffer:
-                            rollout_buffer.extend(parallel_worker.episode)
-                        else: # 10/16 fix: should not mess with SIL's index, just add to ep_queue
+                            # single rollout worker just add to mem, no interference with sil mem
+                            if args.num_rollout_worker == 1:
+                                rollout_buffer.extend(parallel_worker.episode)
+                            # multi rollout worker add to rollout mem is centralized
+                            else:
+                                rollout_ep_queue.put(parallel_worker.episode.get_data())
+                        else:
+                            # 10/16 fix: should not mess with SIL's index, just add to ep_queue
+                            # it's the same for both multi rollout and single worker
                             # shared_memory.extend(parallel_worker.episode)
                             ep_queue.put(parallel_worker.episode.get_data())
 
                     parallel_worker.episode.reset()
 
-                # for centralized A3C counting
+
+                # centralized A3C counting
                 local_a3c_ctr = 0
                 local_a3c_sample_used = 0
                 local_a3c_sample_used_return = 0
                 local_a3c_sample_used_adv = 0
-
+                # centralized SIL counting
                 local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used = 0, 0, 0
                 local_sil_a3c_sampled_return, local_sil_a3c_used_return = 0, 0
                 local_sil_a3c_used_adv, local_sil_rollout_sampled, local_sil_rollout_used = 0, 0, 0
                 local_sil_rollout_sampled_return, local_sil_rollout_used_return = 0, 0
                 local_sil_rollout_used_adv, local_sil_old_sampled, local_sil_old_used = 0, 0, 0
 
-                th_ctr.put(1)
 
             elif parallel_worker.is_classify_thread:
                 # print(class_updates.qsize())
@@ -1069,11 +1131,17 @@ def run_a3c(args):
                         ep_queue.put(parallel_worker.episode.get_data())
                         parallel_worker.episode.reset()
 
+                # centralized SIL counting
                 local_sil_ctr, local_sil_a3c_sampled, local_sil_a3c_used = 0, 0, 0
                 local_sil_a3c_sampled_return, local_sil_a3c_used_return = 0, 0
                 local_sil_a3c_used_adv, local_sil_rollout_sampled, local_sil_rollout_used = 0, 0, 0
                 local_sil_rollout_sampled_return, local_sil_rollout_used_return = 0, 0
                 local_sil_rollout_used_adv, local_sil_old_sampled, local_sil_old_used = 0, 0, 0
+                # centralized rollout counting
+                local_rollout_ctr, local_rollout_added_ctr = 0, 0
+                local_rollout_sample_used, local_rollout_sample_used_adv = 0, 0
+                local_rollout_new_return, local_rollout_old_return = 0, 0
+                local_rollout_steps = 0
 
             # ensure only one thread is updating global_t at a time
             with lock:
@@ -1098,6 +1166,14 @@ def run_a3c(args):
                 sil_rollout_used_adv += local_sil_rollout_used_adv
                 sil_old_sampled += local_sil_old_sampled
                 sil_old_used += local_sil_old_used
+
+                rollout_ctr += local_rollout_ctr
+                rollout_added_ctr += local_rollout_added_ctr
+                rollout_sample_used +=local_rollout_sample_used
+                rollout_sample_used_adv += local_rollout_sample_used_adv
+                rollout_new_return += local_rollout_new_return
+                rollout_old_return += local_rollout_old_return
+                rollout_steps += local_rollout_steps
 
                 # if during a thread's update, global_t has reached a evaluation interval
                 if global_t > next_global_t:
@@ -1238,6 +1314,7 @@ def run_a3c(args):
     for i in range(args.parallel_size):
         th_ctr.put(1)
     episodes_queue = None
+    rollout_episodes_queue = None
     net_updates = None
     class_updates = None
     goodstate_queue = None
@@ -1250,15 +1327,18 @@ def run_a3c(args):
         th_sil_ctr = Queue()
         for i in range(args.num_sil_worker):
             th_sil_ctr.put(1)
-    if args.train_classifier or args.use_rollout:
+    if args.use_rollout: #or args.train_classifier
         class_updates = Queue()
         goodstate_queue = Queue()
         badstate_queue = PriorityQueue(maxsize=args.memory_length)
+        if args.num_rollout_worker > 1:
+            rollout_episodes_queue = Queue()
     for i in range(args.parallel_size):
         worker_thread = Thread(
             target=train_function,
             args=(i, th_ctr, episodes_queue, net_updates, class_updates,
-                goodstate_queue, badstate_queue, badstate_list,th_sil_ctr,))
+                goodstate_queue, badstate_queue, badstate_list,th_sil_ctr,
+                rollout_episodes_queue,))
         train_threads.append(worker_thread)
 
     signal.signal(signal.SIGINT, signal_handler)

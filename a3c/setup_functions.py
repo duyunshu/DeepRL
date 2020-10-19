@@ -65,6 +65,8 @@ def setup_folder(args, env_name):
 
         if args.use_rollout:
             end_str+='_rollout'
+            if args.num_rollout_worker >1 :
+                end_str += str(args.num_rollout_worker)+'workers'
             if args.one_buffer:
                 end_str+="_onebuffer"
             if args.memory_length != 100000:
