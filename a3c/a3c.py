@@ -816,7 +816,7 @@ def run_a3c(args):
 
 
                     # add some waiting time to prevent thread racing
-                    # this might reduce the number of sil updates tho
+                    # although this might reduce the total number of sil updates
                     # the time used here is a rough balance to achieve min(wall time) and max(sil updates)
                     if args.num_sil_worker > 1:
                         time.sleep(0.5)
@@ -927,19 +927,58 @@ def run_a3c(args):
 
                 if args.num_sil_worker > 1: # when milti SIL, make sure only one is adding at a time
                     if q_size >= max:
+                        # the while loop will cause all threads to get stuck in the loop as they get to this point
+                        while th_sil_ctr.qsize() < (args.num_sil_worker + 1):
+                            # guarantees it is the sil_addmem_thread that
+                            # gets out of the while loop first
+                            if parallel_worker.thread_idx == sil_addmem_thread:
+                                # print("thread {} is going to break, th_sil_ctr={}".format(parallel_worker.thread_idx, th_sil_ctr.qsize()))
+                                break
+                            time.sleep(0.001)
+
+                        # as the threads come out, this ensures the other thread
+                        # can not catch up with sil_addmem_thread
+                        if parallel_worker.thread_idx != sil_addmem_thread:
+                        	time.sleep(0.01)
+
+                        # this will make the condition in the while loop above to become false
+                        # thus releasing all the threads stuck in the loop
+                        # and they will all arrive and line-up at sil_lock
+                        th_sil_ctr.put(1)
+
+                        # above codes guarantees it the sil_addmem_thread that gets to sil_lock first
+                        # sil_addmem_thread will execute the code under sil_lock, while
+                        # the other threads as they arrive to sil_lock will get stuck here until their turn
+                        # this ensures no other thread will get passed this point until sil_addmem_thread
+                        # is done adding the episodes to the shared memory
                         with sil_lock:
+                            # print("thread {} arrives at sil_lock".format(parallel_worker.thread_idx))
                             # only allow one thread to add to shared_memory
                             if parallel_worker.thread_idx == sil_addmem_thread:
-                                # wait for every thread done training
-                                while th_sil_ctr.qsize() < args.num_sil_worker:
-                                    time.sleep(0.01)
+                                # print("thread {} inside sil_lock".format(parallel_worker.thread_idx))
+                                # sil_addmem_thread will wait for the other threads
+                                # to come out of the while loop above so they can reach sil_lock
+                                while th_sil_ctr.qsize() != (args.num_sil_worker * 2):
+                                    # print("thread {} waiting others, th_sil_ctr={}".format(parallel_worker.thread_idx, th_sil_ctr.qsize()))
+                                    time.sleep(0.001)
+
+                                # now that the wait is done, all other threads have
+                                # come out of while and executed "put()", we now have
+                                # 2 * num_sil_worker in th_sil_ctr
+                                # remove extra counters so that it goes back to
+                                # the original size num_sil_worker (i.e., after SIL update)
+                                for _ in range(args.num_sil_worker):
+                                    th_sil_ctr.get()
+                                # print("thread {} done removing extra counters, th_sil_ctr={}".format(parallel_worker.thread_idx, th_sil_ctr.qsize()))
+
+                                # now only sil_addmem_thread can execute add_mem here
                                 while not ep_queue.empty():
                                     data = ep_queue.get()
                                     parallel_worker.episode.set_data(*data)
                                     shared_memory.extend(parallel_worker.episode)
                                     parallel_worker.episode.reset()
                                     q_size -= 1
-                                    # This ensures SIL doesn't addmem non-stop and has a chance to train
+                                    # This ensures SIL doesn't keep adding non-stop and has a chance to train
                                     if q_size <= 0:
                                         break
                                 # for multi rollout worker
@@ -950,9 +989,10 @@ def run_a3c(args):
                                         rollout_buffer.extend(parallel_worker.episode)
                                         parallel_worker.episode.reset()
                                         rollout_qsize -= 1
-                                        # This ensures SIL doesn't addmem non-stop and has a chance to train
+                                        # This ensures SIL doesn't keep adding non-stop and has a chance to train
                                         if rollout_qsize <= 0:
                                             break
+                                # print("thread {} done adding, th_sil_ctr={}".format(parallel_worker.thread_idx, th_sil_ctr.qsize()))
 
                 else: # single SIL doesn't need to wait
                     while not ep_queue.empty():
@@ -961,7 +1001,7 @@ def run_a3c(args):
                         shared_memory.extend(parallel_worker.episode)
                         parallel_worker.episode.reset()
                         max -= 1
-                        # This ensures that SIL has a chance to train
+                        # This ensures SIL doesn't keep adding non-stop and has a chance to train
                         if max <= 0:
                             break
                     # for multi rollout worker
@@ -972,7 +1012,7 @@ def run_a3c(args):
                             rollout_buffer.extend(parallel_worker.episode)
                             parallel_worker.episode.reset()
                             rollout_qsize -= 1
-                            # This ensures SIL doesn't addmem non-stop and has a chance to train
+                            # This ensures SIL doesn't keep adding non-stop and has a chance to train
                             if rollout_qsize <= 0:
                                 break
 
@@ -1190,7 +1230,7 @@ def run_a3c(args):
                         time.sleep(0.001)
                         time_waited += 0.001
                         if time_waited > 3600:
-                            sys.exit('Exceed waiting time, exiting...')
+                            sys.exit(1)
 
                     step_t = int(next_global_t - args.eval_freq)
 
@@ -1250,41 +1290,42 @@ def run_a3c(args):
                                                         model=global_pretrained_model)
                         class_last_reward = class_rewards['class_eval'][step_t][0]
 
-                if global_t > next_save_t:
-                    # freq = (args.max_time_step * args.max_time_step_fraction)
-                    # freq = freq // 5
-                    next_save_t = next_t(global_t, args.eval_freq*args.checkpoint_freq)#freq)
-                    # save a3c
-                    checkpt_file = folder / 'model_checkpoints'
-                    checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
-                    saver.save(sess, str(checkpt_file), global_step=global_t,
-                            write_meta_graph=False)
+                    # save after eval has been done
+                    if global_t > next_save_t:
+                        # freq = (args.max_time_step * args.max_time_step_fraction)
+                        # freq = freq // 5
+                        next_save_t = next_t(global_t, args.eval_freq*args.checkpoint_freq)#freq)
+                        # save a3c
+                        checkpt_file = folder / 'model_checkpoints'
+                        checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
+                        saver.save(sess, str(checkpt_file), global_step=global_t,
+                                write_meta_graph=False)
 
-                    # dump pickle
-                    dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
-                                [reward_fname, sil_fname, rollout_fname, a3c_fname])
-                    if args.load_pretrained_model:
-                        dump_pickle([class_rewards], [class_reward_fname])
+                        # dump pickle
+                        dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
+                                    [reward_fname, sil_fname, rollout_fname, a3c_fname])
+                        if args.load_pretrained_model:
+                            dump_pickle([class_rewards], [class_reward_fname])
 
-                    logger.info('Dump pickle at step {}'.format(global_t))
+                        logger.info('Dump pickle at step {}'.format(global_t))
 
-                    # save replay buffer (only works for priority mem for now)
-                    if args.checkpoint_buffer:
-                        if shared_memory is not None and args.priority_memory:
-                            params = [shared_memory.buff._next_idx, shared_memory.buff._max_priority]
-                            trees = [shared_memory.buff._it_sum._value,
-                                     shared_memory.buff._it_min._value]
-                            dump_pickle([shared_memory.buff._storage, params, trees],
-                                        [sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname])
-                            logger.info('Saving shared_memory')
+                        # save replay buffer (only works for priority mem for now)
+                        if args.checkpoint_buffer:
+                            if shared_memory is not None and args.priority_memory:
+                                params = [shared_memory.buff._next_idx, shared_memory.buff._max_priority]
+                                trees = [shared_memory.buff._it_sum._value,
+                                         shared_memory.buff._it_min._value]
+                                dump_pickle([shared_memory.buff._storage, params, trees],
+                                            [sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname])
+                                logger.info('Saving shared_memory')
 
-                        if rollout_buffer is not None and args.priority_memory:
-                            params = [rollout_buffer.buff._next_idx, rollout_buffer.buff._max_priority]
-                            trees = [rollout_buffer.buff._it_sum._value,
-                                     rollout_buffer.buff._it_min._value]
-                            dump_pickle([rollout_buffer.buff._storage, params, trees],
-                                        [rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname])
-                            logger.info('Saving rollout_buffer')
+                            if rollout_buffer is not None and args.priority_memory:
+                                params = [rollout_buffer.buff._next_idx, rollout_buffer.buff._max_priority]
+                                trees = [rollout_buffer.buff._it_sum._value,
+                                         rollout_buffer.buff._it_min._value]
+                                dump_pickle([rollout_buffer.buff._storage, params, trees],
+                                            [rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname])
+                                logger.info('Saving rollout_buffer')
 
 
     def signal_handler(signal, frame):

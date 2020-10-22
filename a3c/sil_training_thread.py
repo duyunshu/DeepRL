@@ -317,7 +317,7 @@ class SILTrainingThread(CommonWorker):
                 num_old_sampled += np.sum(batch_refresh)
 
             # sil policy update (if one full batch sampled)
-            # this control is mostly for rollout because rollout buffer takes time to fill)
+            # this control is mostly for rollout because rollout buffer takes time to fill
             if len(batch_state) == self.batch_size:
                 feed_dict = {
                     self.local_net.s: batch_state,
@@ -346,13 +346,13 @@ class SILTrainingThread(CommonWorker):
 
                 rollout_idx = [i for (i, num) in enumerate(batch_rollout) if num > 0]
                 pos_rollout_idx = np.intersect1d(rollout_idx, pos_idx)
-                if len(pos_rollout_idx) > 0 and len(pos_rollout_idx) == num_rollout_used:
+                if len(pos_rollout_idx) > 0: # and len(pos_rollout_idx) == num_rollout_used: <==10/20 this made count inaccurate!!
                     local_sil_rollout_used_return += np.sum(np.take(batch_returns, pos_rollout_idx))
                     local_sil_rollout_used_adv += np.sum(np.take(adv, pos_rollout_idx))
 
                 a3c_idx = [i for (i, num) in enumerate(batch_rollout) if num <= 0]
                 pos_a3c_idx = np.intersect1d(a3c_idx, pos_idx)
-                if len(pos_a3c_idx) > 0 and len(pos_a3c_idx)==num_a3c_used:
+                if len(pos_a3c_idx) > 0: # and len(pos_a3c_idx)==num_a3c_used: <==10/20this made count inaccurate!!
                     local_sil_a3c_used_return += np.sum(np.take(batch_returns, pos_a3c_idx))
                     local_sil_a3c_used_adv += np.sum(np.take(adv, pos_a3c_idx))
 
