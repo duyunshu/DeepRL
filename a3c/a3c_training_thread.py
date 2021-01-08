@@ -221,15 +221,18 @@ class A3CTrainingThread(CommonWorker):
                 env = self.game_state.env
                 name = 'EpisodicLifeEnv'
                 if get_wrapper_by_name(env, name).was_real_done:
-                    log_msg = "train: worker={} global_t={} local_t={}".format(
-                        self.thread_idx, global_t, self.local_t)
+                    # reduce log freq
+                    if self.thread_idx == self.log_idx:
+                        log_msg = "train: worker={} global_t={} local_t={}".format(
+                            self.thread_idx, global_t, self.local_t)
 
-                    score_str = colored("score={}".format(
-                        self.episode_reward), "magenta")
-                    steps_str = colored("steps={}".format(
-                        self.episode_steps), "blue")
-                    log_msg += " {} {}".format(score_str, steps_str)
-                    logger.debug(log_msg)
+                        score_str = colored("score={}".format(
+                            self.episode_reward), "magenta")
+                        steps_str = colored("steps={}".format(
+                            self.episode_steps), "blue")
+                        log_msg += " {} {}".format(score_str, steps_str)
+                        logger.debug(log_msg)
+
                     train_rewards['train'][global_t] = (self.episode_reward,
                                                         self.episode_steps)
                     self.record_summary(

@@ -16,6 +16,8 @@ from common_worker import CommonWorker
 from sil_memory import SILReplayMemory
 from datetime import datetime
 
+import random
+
 logger = logging.getLogger("sil_training_thread")
 
 
@@ -267,6 +269,11 @@ class SILTrainingThread(CommonWorker):
                 # update priority of sampled experiences
                 self.update_priorities_once(sess, sil_memory, s_index_list,
                                             s_batch_state, s_action, s_batch_returns)
+
+                # print("s_returns: ", sorted(s_batch_returns, reverse=True))
+                # print("s_return_ave", np.mean(s_batch_returns))
+                # print("s num zeros: ", np.count_nonzero(s_batch_returns==0.0))
+
                 if self.temp_buffer is not None:
                     s_batch_action = convert_onehot_to_a(s_action)
                     self.temp_buffer.extend_one_priority(s_batch_state, s_batch_fullstate,
@@ -290,6 +297,11 @@ class SILTrainingThread(CommonWorker):
                 # update priority of sampled experiences
                 self.update_priorities_once(sess, rollout_buffer, r_index_list,
                                             r_batch_state, r_action, r_batch_returns)
+
+                # print("r_returns: ", sorted(r_batch_returns, reverse=True))
+                # print("r_return_ave", np.mean(r_batch_returns))
+                # print("r num zeros: ", np.count_nonzero(r_batch_returns==0.0))
+
                 if self.temp_buffer is not None:
                     r_batch_action = convert_onehot_to_a(r_action)
                     self.temp_buffer.extend_one_priority(r_batch_state, r_batch_fullstate,
@@ -311,6 +323,44 @@ class SILTrainingThread(CommonWorker):
                 index_list, batch, weights = sample
                 batch_state, batch_action, batch_returns, \
                     batch_fullstate, batch_rollout, batch_refresh = batch
+
+            #     ################
+            #     # print("sample_proportional(batch_size)")
+            #     p_total = self.temp_buffer.buff._it_sum.sum(0, len(self.temp_buffer.buff._storage)-1)
+            #     every_range_len = p_total / self.batch_size
+            #     # print("p_total: ", p_total)
+            #     # print("every_range_len: ", every_range_len)
+            #     for ii in range(self.batch_size):
+            #         mass = random.random() * every_range_len + ii * every_range_len
+            #         # print("mass: {}, sample {}".format(mass, ii))
+            #         idx = self.temp_buffer.buff._it_sum.find_prefixsum_idx(mass)
+            #         # print("idx: ", idx)
+            #     ################
+            #
+            #
+            #     ################
+            #     # print("if beta > 0")
+            #     # print("it_min: ", self.temp_buffer.buff._it_min.min())
+            #     # print("it_sum: ", self.temp_buffer.buff._it_sum.sum())
+            #     tmp_weights = []
+            #     p_min = self.temp_buffer.buff._it_min.min() / self.temp_buffer.buff._it_sum.sum()
+            #     max_weight = (p_min * len(self.temp_buffer.buff._storage)) ** (-0.4)
+            #     # print("p_min: ", p_min)
+            #     # print("max_weight: ", max_weight)
+            #
+            #     for idx in index_list:
+            #         p_sample = self.temp_buffer.buff._it_sum[idx] / self.temp_buffer.buff._it_sum.sum()
+            #         weight = (p_sample * len(self.temp_buffer.buff._storage)) ** (-0.4)
+            #         tmp_weights.append(weight / max_weight)
+            #         # print("p_sample: {}, idx: {}".format(p_sample, idx))
+            #         # print("weight: ", weight)
+            #
+            # # print("temp weights: ", tmp_weights)
+            # print("batch_returns:", sorted(batch_returns, reverse=True))
+            # print("num zeros: ", np.count_nonzero(np.array(batch_returns)==0.0))
+            # print("========")
+            # time.sleep(2)
+                ################
 
             if self.use_rollout:
                 num_rollout_sampled += np.sum(batch_rollout)

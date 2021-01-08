@@ -8,6 +8,7 @@ import pyglet
 import cv2
 import threading
 import numpy as np
+import pygame
 
 from time import sleep
 from gym import spaces

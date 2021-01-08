@@ -108,6 +108,8 @@ def run_a3c(args):
     sil_rollout_sampled, sil_rollout_used, sil_rollout_sampled_return, sil_rollout_used_return = 0, 0, 0, 0
     sil_rollout_used_adv = 0
     sil_old_sampled, sil_old_used = 0, 0
+    sil_sample_ratio_arr = {}
+    sil_sample_ratio_ctr = []
 
     rollout_dict = {"rollout_ctr": {}, # total number of rollout performed (i.e., refresh freq)
                     "rollout_added_ctr":{}, # total number of successful rollout (i.e., freq of Gnew > G, also is number of rollout updates)
@@ -142,6 +144,9 @@ def run_a3c(args):
     rolloutmem_fname = folder / '{}-rolloutmem.pkl'.format(GYM_ENV_NAME)
     rolloutmem_params_fname = folder / '{}-rolloutmem-params.pkl'.format(GYM_ENV_NAME)
     rolloutmem_trees_fname = folder / '{}-rolloutmem-trees.pkl'.format(GYM_ENV_NAME)
+
+    # for removing old ckpt, save storage
+    prev_ckpt_t = -1
 
     stop_req = False
     a3clog = False
@@ -490,7 +495,7 @@ def run_a3c(args):
 
     # init or load checkpoint with saver
     root_saver = tf.train.Saver(max_to_keep=1)
-    saver = tf.train.Saver(max_to_keep=3)
+    saver = tf.train.Saver(max_to_keep=1)
     best_saver = tf.train.Saver(max_to_keep=1)
 
     checkpoint = tf.train.get_checkpoint_state(str(folder)+'/model_checkpoints')
@@ -521,10 +526,11 @@ def run_a3c(args):
         with best_reward_file.open('r') as f:
             best_model_reward = float(f.read())
 
-        rewards = pickle.load(reward_fname.open('rb'))
+        rewards = restore_dict(reward_fname, global_t)
+        # rewards = pickle.load(reward_fname+str(tmp_t).open('rb'))
         logger.info(">>> restored: rewards")
 
-        sil_dict = pickle.load(sil_fname.open('rb'))
+        sil_dict = restore_dict(sil_fname, global_t) #pickle.load(sil_fname+str(tmp_t).open('rb'))
         sil_ctr = sil_dict['sil_ctr'][tmp_t]
         sil_a3c_sampled = sil_dict['sil_a3c_sampled'][tmp_t]
         sil_a3c_used = sil_dict['sil_a3c_used'][tmp_t]
@@ -540,7 +546,7 @@ def run_a3c(args):
         sil_old_used = sil_dict['sil_old_used'][tmp_t]
         logger.info(">>> restored: sil_dict")
 
-        rollout_dict = pickle.load(rollout_fname.open('rb'))
+        rollout_dict = restore_dict(rollout_fname, global_t) # pickle.load(rollout_fname+str(tmp_t).open('rb'))
         rollout_ctr = rollout_dict['rollout_ctr'][tmp_t]
         rollout_added_ctr = rollout_dict['rollout_added_ctr'][tmp_t]
         rollout_steps = rollout_dict['rollout_steps'][tmp_t]
@@ -550,7 +556,7 @@ def run_a3c(args):
         rollout_old_return = rollout_dict['rollout_old_return'][tmp_t]
         logger.info(">>> restored: rollout_dict")
 
-        a3c_dict = pickle.load(a3c_fname.open('rb'))
+        a3c_dict = restore_dict(a3c_fname, global_t) # pickle.load(a3c_fname+str(tmp_t).open('rb'))
         a3c_ctr = a3c_dict['a3c_ctr'][tmp_t]
         a3c_sample_used = a3c_dict['a3c_sample_used'][tmp_t]
         a3c_sample_used_return = a3c_dict['a3c_sample_used_return'][tmp_t]
@@ -559,21 +565,24 @@ def run_a3c(args):
 
         if args.load_pretrained_model:
             class_reward_file = folder / '{}-class-rewards.pkl'.format(GYM_ENV_NAME)
-            class_rewards = pickle.load(class_reward_file.open('rb'))
+            class_rewards = restore_dict(class_reward_file, tmp_t) # pickle.load(class_reward_file+str(tmp_t).open('rb'))
 
         # set up replay buffers
         if args.checkpoint_buffer:
             if args.use_sil and args.priority_memory:
-                shared_memory = restore_buffer(sharedmem_fname, shared_memory)
-                shared_memory = restore_buffer_trees(sharedmem_trees_fname, shared_memory)
-                shared_memory = restore_buffer_params(sharedmem_params_fname, shared_memory)
+                shared_memory = restore_buffer(sharedmem_fname, shared_memory, global_t)
+                shared_memory = restore_buffer_trees(sharedmem_trees_fname, shared_memory, global_t)
+                shared_memory = restore_buffer_params(sharedmem_params_fname, shared_memory, global_t)
                 shared_memory.log()
 
                 if args.use_rollout and not args.one_buffer:
-                    rollout_buffer = restore_buffer(rolloutmem_fname, rollout_buffer)
-                    rollout_buffer = restore_buffer_trees(rolloutmem_trees_fname, rollout_buffer)
-                    rollout_buffer = restore_buffer_params(rolloutmem_params_fname, rollout_buffer)
+                    rollout_buffer = restore_buffer(rolloutmem_fname, rollout_buffer, global_t)
+                    rollout_buffer = restore_buffer_trees(rolloutmem_trees_fname, rollout_buffer, global_t)
+                    rollout_buffer = restore_buffer_params(rolloutmem_params_fname, rollout_buffer, global_t)
                     rollout_buffer.log()
+
+        # if all restores okay, remove ckpt to save storage space
+        prev_ckpt_t = global_t
 
     else:
         logger.warning("Could not find old checkpoint")
@@ -610,14 +619,15 @@ def run_a3c(args):
                        goodstate_queue, badstate_queue, badstate_list, \
                        th_sil_ctr, rollout_ep_queue):
         nonlocal global_t, step_t, rewards, class_rewards, lock, sil_lock, rollout_lock, \
-                 next_save_t, next_global_t, a3clog
+                 next_save_t, next_global_t, a3clog, prev_ckpt_t
         nonlocal shared_memory, exp_buffer, rollout_buffer
         nonlocal _stop_rollout, last_reward, class_last_reward #rollout_sample_proportion,
         nonlocal sil_dict, sil_ctr, sil_a3c_sampled, sil_a3c_used, \
                  sil_a3c_sampled_return, sil_a3c_used_return, sil_a3c_used_adv,\
                  sil_rollout_sampled, sil_rollout_used, \
                  sil_rollout_sampled_return, sil_rollout_used_return, sil_rollout_used_adv,\
-                 sil_old_sampled, sil_old_used
+                 sil_old_sampled, sil_old_used, \
+                 sil_sample_ratio_arr, sil_sample_ratio_ctr
         nonlocal rollout_dict, rollout_ctr, rollout_added_ctr, rollout_sample_used,\
                  rollout_sample_used_adv,\
                  rollout_new_return, rollout_old_return, rollout_steps
@@ -659,9 +669,18 @@ def run_a3c(args):
                     class_rewards['class_eval'][step_t] = \
                         parallel_worker.test_fixed_classifier(global_t=global_t,
                                                     max_steps=args.eval_max_steps,
+                                                    max_eps=50, # run 50 episodes instead of 125000 steps
                                                     sess=pretrain_sess,
                                                     worker=all_workers[-1],
                                                     model=global_pretrained_model)
+                    class_eval_file = pathlib.Path(args.pretrained_model_folder[:41]+str(GAME_NAME)+"/"+str(GAME_NAME)+'-eval.txt')
+                    class_std = np.std(class_rewards['class_eval'][step_t][-1])
+                    class_mean = np.mean(class_rewards['class_eval'][step_t][-1])
+                    with class_eval_file.open('w') as f:
+                        f.write("class_mean: \n" + str(class_mean) + "\n")
+                        f.write("class_std: \n" + str(class_std) + "\n")
+                        f.write("class_rewards: \n" + str(class_rewards['class_eval'][step_t][-1]) + "\n")
+                    # int(input())
                     class_last_reward = class_rewards['class_eval'][step_t][0]
 
                 checkpt_file = folder / 'model_checkpoints'
@@ -701,9 +720,10 @@ def run_a3c(args):
                 # dump pickle
                 # not saving class_reward
                 dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
-                            [reward_fname, sil_fname, rollout_fname, a3c_fname])
+                            [reward_fname, sil_fname, rollout_fname, a3c_fname],
+                            global_t)
                 if args.load_pretrained_model:
-                    dump_pickle([class_rewards], [class_reward_fname])
+                    dump_pickle([class_rewards], [class_reward_fname], global_t)
 
                 logger.info('Dump pickle at step {}'.format(global_t))
 
@@ -714,7 +734,8 @@ def run_a3c(args):
                         trees = [shared_memory.buff._it_sum._value,
                                  shared_memory.buff._it_min._value]
                         dump_pickle([shared_memory.buff._storage, params, trees],
-                                    [sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname])
+                                    [sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname],
+                                    global_t)
                         logger.info('Saving shared_memory')
 
                     if rollout_buffer is not None and args.priority_memory:
@@ -722,8 +743,11 @@ def run_a3c(args):
                         trees = [rollout_buffer.buff._it_sum._value,
                                  rollout_buffer.buff._it_min._value]
                         dump_pickle([rollout_buffer.buff._storage, params, trees],
-                                    [rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname])
+                                    [rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname],
+                                    global_t)
                         logger.info('Saving rollout_buffer')
+
+                prev_ckpt_t = global_t
 
                 step_t = 1
 
@@ -814,6 +838,9 @@ def run_a3c(args):
                     th_sil_ctr.put(1)
                     th_ctr.put(1)
 
+                    # record sil samples as array for a more accurate count
+                    if args.num_sil_worker == 1 and global_t < args.eval_freq:
+                        sil_sample_ratio_ctr.append(local_sil_a3c_sampled)
 
                     # add some waiting time to prevent thread racing
                     # although this might reduce the total number of sil updates
@@ -860,7 +887,7 @@ def run_a3c(args):
                         #                       bads=badstate_queue.qsize(),
                         #                       global_t=global_t)
 
-                        if sil_ctr % (args.num_sil_worker*100) <= 3 and sil_ctr > 0:
+                        if sil_ctr % (args.num_sil_worker*100*2) <= 3 and sil_ctr > 0:
                             rollout_buffsize = 0
                             if not args.one_buffer:
                                 rollout_buffsize = len(rollout_buffer)
@@ -894,6 +921,12 @@ def run_a3c(args):
                                         " old_used={13:}"
                                         " #good_states={14:}"
                                         " #bad_states={15:}".format(*log_data))
+
+                            # record sil samples as array for a more accurate count
+                            # do so every 100 sil_ctr and this only works in single SIL (no centralized)
+                            if args.num_sil_worker == 1 and global_t < args.eval_freq:
+                                sil_sample_ratio_arr[sil_ctr] = sil_sample_ratio_ctr
+                                sil_sample_ratio_ctr = []
                     else:
                         # parallel_worker.record_sil(sil_ctr=sil_ctr,
                         #                            total_used=(sil_a3c_used + sil_rollout_used),
@@ -901,7 +934,7 @@ def run_a3c(args):
                         #                            rollout_sampled=sil_rollout_sampled,
                         #                            rollout_used=sil_rollout_used,
                         #                            global_t=global_t)
-                        if sil_ctr % (args.num_sil_worker*100) <= 3 and sil_ctr > 0:
+                        if sil_ctr % (args.num_sil_worker*100*2) <= 3 and sil_ctr > 0:
                             log_data = (sil_ctr, sil_a3c_used+sil_rollout_used,
                                         args.batch_size*sil_ctr,
                                         sil_a3c_used,
@@ -1036,6 +1069,7 @@ def run_a3c(args):
                 local_rollout_steps = 0
 
 
+
             elif parallel_worker.is_rollout_thread:
                 diff_global_t = 0
                 local_rollout_ctr, local_rollout_added_ctr = 0, 0
@@ -1114,7 +1148,6 @@ def run_a3c(args):
                 local_sil_a3c_used_adv, local_sil_rollout_sampled, local_sil_rollout_used = 0, 0, 0
                 local_sil_rollout_sampled_return, local_sil_rollout_used_return = 0, 0
                 local_sil_rollout_used_adv, local_sil_old_sampled, local_sil_old_used = 0, 0, 0
-
 
             elif parallel_worker.is_classify_thread:
                 # print(class_updates.qsize())
@@ -1207,6 +1240,7 @@ def run_a3c(args):
                 sil_old_sampled += local_sil_old_sampled
                 sil_old_used += local_sil_old_used
 
+
                 rollout_ctr += local_rollout_ctr
                 rollout_added_ctr += local_rollout_added_ctr
                 rollout_sample_used +=local_rollout_sample_used
@@ -1224,13 +1258,14 @@ def run_a3c(args):
                     next_global_t = next_t(global_t, args.eval_freq)
                     step_t = int(next_global_t - args.eval_freq)
 
-                    # wait 1 hour max for all threads to finish before testing
-                    time_waited = 0
+                    # # wait 1 hour max for all threads to finish before testing
+                    # # (doesn't seem to work in clusters)
+                    # time_waited = 0
                     while not stop_req and th_ctr.qsize() < len(all_workers):
                         time.sleep(0.001)
-                        time_waited += 0.001
-                        if time_waited > 3600:
-                            sys.exit(1)
+                        # time_waited += 0.001
+                        # if time_waited > 3600:
+                        #     sys.exit(1)
 
                     step_t = int(next_global_t - args.eval_freq)
 
@@ -1269,45 +1304,51 @@ def run_a3c(args):
                     a3c_dict['a3c_sample_used_return'][step_t] = a3c_sample_used_return
                     a3c_dict['a3c_sample_used_adv'][step_t] = a3c_sample_used_adv
 
-                    # testing classifier in game (retrain classifier)
-                    if args.train_classifier:
-                        assert classifier_index is not None
-                        class_rewards['class_eval'][step_t] = \
-                            parallel_worker.test_retrain_classifier(global_t=step_t,
-                                                        max_steps=args.eval_max_steps,
-                                                        sess=pretrain_sess,
-                                                        worker=all_workers[classifier_index])
-                        class_last_reward = class_rewards['class_eval'][step_t][0]
-                    # testing classifier in game (fix classifier)
-                    elif args.load_pretrained_model:
-                        assert pretrain_sess is not None
-                        assert global_pretrained_model is not None
-                        class_rewards['class_eval'][step_t] = \
-                            parallel_worker.test_fixed_classifier(global_t=step_t,
-                                                        max_steps=args.eval_max_steps,
-                                                        sess=pretrain_sess,
-                                                        worker=all_workers[-1],
-                                                        model=global_pretrained_model)
-                        class_last_reward = class_rewards['class_eval'][step_t][0]
+                    # # testing classifier in game (retrain classifier)
+                    # # 10/31: only test once at step 0 since classifiers are fixed
+                    # if args.train_classifier:
+                    #     assert classifier_index is not None
+                    #     class_rewards['class_eval'][step_t] = \
+                    #         parallel_worker.test_retrain_classifier(global_t=step_t,
+                    #                                     max_steps=args.eval_max_steps,
+                    #                                     sess=pretrain_sess,
+                    #                                     worker=all_workers[classifier_index])
+                    #     class_last_reward = class_rewards['class_eval'][step_t][0]
+                    # # testing classifier in game (fix classifier)
+                    # elif args.load_pretrained_model:
+                    #     assert pretrain_sess is not None
+                    #     assert global_pretrained_model is not None
+                    #     class_rewards['class_eval'][step_t] = \
+                    #         parallel_worker.test_fixed_classifier(global_t=step_t,
+                    #                                     max_steps=args.eval_max_steps,
+                    #                                     sess=pretrain_sess,
+                    #                                     worker=all_workers[-1],
+                    #                                     model=global_pretrained_model)
+                    #     class_last_reward = class_rewards['class_eval'][step_t][0]
 
                     # save after eval has been done
                     if global_t > next_save_t:
                         # freq = (args.max_time_step * args.max_time_step_fraction)
                         # freq = freq // 5
                         next_save_t = next_t(global_t, args.eval_freq*args.checkpoint_freq)#freq)
-                        # save a3c
-                        checkpt_file = folder / 'model_checkpoints'
-                        checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
-                        saver.save(sess, str(checkpt_file), global_step=global_t,
-                                write_meta_graph=False)
 
                         # dump pickle
                         dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
-                                    [reward_fname, sil_fname, rollout_fname, a3c_fname])
+                                    [reward_fname, sil_fname, rollout_fname, a3c_fname],
+                                    global_t)
                         if args.load_pretrained_model:
-                            dump_pickle([class_rewards], [class_reward_fname])
-
+                            dump_pickle([class_rewards], [class_reward_fname], global_t)
                         logger.info('Dump pickle at step {}'.format(global_t))
+
+                        # dump sample_ratio pickle once
+                        if step_t <= args.eval_freq:
+                            # print("sil_sample_ratio_arr: ", sil_sample_ratio_arr)
+                            fn = folder / '{}-a3c-dict-sampleratio.pkl'.format(GYM_ENV_NAME)
+                            pickle.dump(sil_sample_ratio_arr, fn.open('wb'), pickle.HIGHEST_PROTOCOL)
+                            logger.info('Dump sample_ratio pickle once at step {}'.format(global_t))
+                            # clear data
+                            sil_sample_ratio_arr = {}
+                            sil_sample_ratio_ctr = []
 
                         # save replay buffer (only works for priority mem for now)
                         if args.checkpoint_buffer:
@@ -1316,7 +1357,8 @@ def run_a3c(args):
                                 trees = [shared_memory.buff._it_sum._value,
                                          shared_memory.buff._it_min._value]
                                 dump_pickle([shared_memory.buff._storage, params, trees],
-                                            [sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname])
+                                            [sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname],
+                                            global_t)
                                 logger.info('Saving shared_memory')
 
                             if rollout_buffer is not None and args.priority_memory:
@@ -1324,8 +1366,33 @@ def run_a3c(args):
                                 trees = [rollout_buffer.buff._it_sum._value,
                                          rollout_buffer.buff._it_min._value]
                                 dump_pickle([rollout_buffer.buff._storage, params, trees],
-                                            [rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname])
+                                            [rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname],
+                                            global_t)
                                 logger.info('Saving rollout_buffer')
+
+                        # save a3c last -- in case saving buffer OOM
+                        # so that at least we can revert back to the previous ckpt
+                        checkpt_file = folder / 'model_checkpoints'
+                        checkpt_file /= '{}_checkpoint'.format(GYM_ENV_NAME)
+                        saver.save(sess, str(checkpt_file), global_step=global_t,
+                                write_meta_graph=False)
+                        logger.info('Saving model ckpt')
+
+                        # if everything saves good, remove the previous ckpt to save space
+                        remove_pickle([reward_fname, sil_fname, rollout_fname, a3c_fname],
+                                      prev_ckpt_t)
+                        if args.load_pretrained_model:
+                            remove_pickle([class_reward_fname], prev_ckpt_t)
+
+                        remove_pickle([sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname],
+                                      prev_ckpt_t)
+
+                        remove_pickle([rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname],
+                                      prev_ckpt_t)
+
+                        logger.info('Removing ckpt {}'.format(prev_ckpt_t))
+
+                        prev_ckpt_t = global_t
 
 
     def signal_handler(signal, frame):
@@ -1396,7 +1463,7 @@ def run_a3c(args):
     for t in train_threads:
         t.join()
 
-    logger.info('Now saving data. Please wait')
+    logger.info('Training completed. Now saving data. Please wait')
 
     # write wall time
     wall_t = time.time() - start_time
@@ -1404,14 +1471,30 @@ def run_a3c(args):
     with wall_t_fname.open('w') as f:
         f.write(str(wall_t))
 
-
     checkpoint_file = str(folder / '{}_checkpoint_a3c'.format(GYM_ENV_NAME))
     root_saver.save(sess, checkpoint_file, global_step=global_t)
 
-    dump_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
-                [reward_fname, sil_fname, rollout_fname, a3c_fname])
+    dump_final_pickle([rewards, sil_dict, rollout_dict, a3c_dict],
+                      [reward_fname, sil_fname, rollout_fname, a3c_fname])
 
     logger.info('Data saved!')
+
+    # if everything saves good, remove the previous ckpt to save space
+    remove_pickle([reward_fname, sil_fname, rollout_fname, a3c_fname],
+                  prev_ckpt_t)
+    if args.load_pretrained_model:
+        remove_pickle([class_reward_fname], prev_ckpt_t)
+
+    remove_pickle([sharedmem_fname, sharedmem_params_fname, sharedmem_trees_fname],
+                  prev_ckpt_t)
+
+    remove_pickle([rolloutmem_fname, rolloutmem_params_fname, rolloutmem_trees_fname],
+                  prev_ckpt_t)
+
+    logger.info('Removing ckpt {}'.format(prev_ckpt_t))
+
+    prev_ckpt_t = global_t
+
 
     sess.close()
     if pretrain_sess:

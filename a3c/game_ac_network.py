@@ -2,6 +2,7 @@
 import logging
 import numpy as np
 import tensorflow as tf
+import pygame
 
 from abc import ABC
 from abc import abstractmethod

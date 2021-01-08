@@ -545,7 +545,7 @@ class CommonWorker(object):
         return (total_reward, total_steps, n_episodes)
 
 
-    def test_fixed_classifier(self, global_t, max_steps, sess, worker=None, model=None):
+    def test_fixed_classifier(self, global_t, max_steps, max_eps, sess, worker=None, model=None):
         """Evaluate game with current classifier model."""
         assert model is not None
         assert sess is not None
@@ -561,7 +561,7 @@ class CommonWorker(object):
         episode_steps = 0
         n_episodes = 0
         reward_list = []
-        while max_steps > 0:
+        while n_episodes < max_eps: #max_steps > 0:
             # worker.game_state.env.render()
             state = cv2.resize(worker.game_state.s_t,
                                model.in_shape[:-1],

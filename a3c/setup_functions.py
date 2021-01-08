@@ -1,6 +1,7 @@
 import os
 import logging
 import numpy as np
+import pathlib
 
 from common.util import load_memory
 
@@ -335,8 +336,9 @@ def initialize_uninitialized(tf, sess, model=None):
     if len(not_initialized_vars):
         sess.run(tf.variables_initializer(not_initialized_vars))
 
-def restore_buffer(fn, buffer):
-    temp = pickle.load(fn.open('rb'))
+def restore_buffer(fn, buffer, global_t):
+    filename = str(fn) + "-" + str(global_t)
+    temp = pickle.load(pathlib.Path(filename).open('rb'))
     x_states = []
     x_fullstates = []
     x_actions = []
@@ -357,23 +359,42 @@ def restore_buffer(fn, buffer):
     del temp
     return buffer
 
-def restore_buffer_trees(fn, buffer):
-    temp = pickle.load(fn.open('rb'))
+def restore_buffer_trees(fn, buffer, global_t):
+    filename = str(fn) + "-" + str(global_t)
+    temp = pickle.load(pathlib.Path(filename).open('rb'))
     assert len(temp) == 2
     buffer.buff._it_sum._value = temp[0]
     buffer.buff._it_min._value = temp[1]
     del temp
     return buffer
 
-def restore_buffer_params(fn, buffer):
-    temp = pickle.load(fn.open('rb'))
+def restore_buffer_params(fn, buffer, global_t):
+    filename = str(fn) + "-" + str(global_t)
+    temp = pickle.load(pathlib.Path(filename).open('rb'))
     assert len(temp) == 2
     buffer.buff._next_idx = temp[0]
     buffer.buff._max_priority = temp[1]
     del temp
     return buffer
 
-def dump_pickle(dict_list, fn_list):
+def restore_dict(dict_name, global_t):
+    fn = str(dict_name) + "-" + str(global_t)
+    file = pickle.load(pathlib.Path(fn).open('rb'))
+    return file
+
+def dump_pickle(dict_list, fn_list, global_t=""):
     assert len(dict_list) == len(fn_list)
     for i in range(len(dict_list)):
-        pickle.dump(dict_list[i], fn_list[i].open('wb'), pickle.HIGHEST_PROTOCOL)
+        fn = str(fn_list[i]) + "-" + str(global_t)
+        pickle.dump(dict_list[i], pathlib.Path(fn).open('wb'), pickle.HIGHEST_PROTOCOL)
+
+def dump_final_pickle(dict_list, fn_list):
+    assert len(dict_list) == len(fn_list)
+    for i in range(len(dict_list)):
+        fn = str(fn_list[i])
+        pickle.dump(dict_list[i], pathlib.Path(fn).open('wb'), pickle.HIGHEST_PROTOCOL)
+
+def remove_pickle(fn_list, global_t):
+    for i in range(len(fn_list)):
+        fn = str(fn_list[i]) + "-" + str(global_t)
+        os.remove(fn)
